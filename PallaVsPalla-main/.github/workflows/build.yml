@@ -1,0 +1,154 @@
+name: Build Windows EXE & Android APK
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --config Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PallaVsPalla-Windows
+          path: build/Release/PallaVsPalla.exe
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - name: Install Android CMake 3.30.3
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          echo "y" | "$SDK/cmdline-tools/latest/bin/sdkmanager" "cmake;3.30.3"
+      - run: git clone --recurse-submodules --depth 1 https://github.com/Bigfoot71/raymob.git android-build
+      - name: Inject Game Sources, HTTP, Native Keyboard & Fullscreen
+        run: |
+          rm -f android-build/app/src/main/cpp/main.c
+          cp src/main.cpp src/game.cpp src/game.hpp src/ball_vm.cpp src/ball_vm.hpp src/ai_client.cpp src/ai_client.hpp src/audio_synth.c src/audio_synth.h android-build/app/src/main/cpp/
+          python3 -c '
+          p = "android-build/app/src/main/cpp/CMakeLists.txt"
+          txt = open(p).read()
+          if "main.c" in txt: txt = txt.replace("main.c", "main.cpp game.cpp ball_vm.cpp ai_client.cpp audio_synth.c")
+          elif "*.c" in txt and "*.cpp" not in txt: txt = txt.replace("*.c", "*.c *.cpp")
+          txt = "set(CMAKE_CXX_STANDARD 17)\n" + txt + "\nset_source_files_properties(main.cpp game.cpp ball_vm.cpp ai_client.cpp PROPERTIES COMPILE_OPTIONS -std=c++17)\n"
+          open(p, "w").write(txt)
+          '
+          python3 -c '
+          p = "android-build/gradle.properties"
+          out = []
+          for l in open(p).read().splitlines():
+              if l.startswith("app.name="): out.append("app.name=Palla VS Palla 3D")
+              elif l.startswith("app.application_id="): out.append("app.application_id=com.pallavspalla.game")
+              else: out.append(l)
+          open(p, "w").write("\n".join(out) + "\n")
+          '
+          python3 -c '
+          p = "android-build/app/src/main/AndroidManifest.xml"
+          m = open(p).read()
+          if "android.permission.INTERNET" not in m:
+              m = m.replace("<application", "    <uses-permission android:name=\"android.permission.INTERNET\" />\n    <application", 1)
+              open(p, "w").write(m)
+          '
+          python3 -c '
+          import glob
+          java_methods = """
+              private volatile String pendingInputText = "";
+              private volatile boolean pendingInputDone = false;
+
+              public void openInputDialog(final String title, final String initial) {
+                  pendingInputDone = false;
+                  final NativeLoader self = this;
+                  runOnUiThread(new Runnable() {
+                      @Override public void run() {
+                          final android.widget.EditText et = new android.widget.EditText(self);
+                          et.setText(initial);
+                          et.setSelection(initial.length());
+                          et.setSingleLine(false);
+                          et.setMaxLines(5);
+                          et.setTextColor(0xFFFFFFFF);
+                          et.setBackgroundColor(0xFF1A2238);
+                          et.setPadding(28, 28, 28, 28);
+                          android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(self, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                              .setTitle(title)
+                              .setView(et)
+                              .setPositiveButton("OK", new android.content.DialogInterface.OnClickListener() {
+                                  @Override public void onClick(android.content.DialogInterface d, int w) {
+                                      pendingInputText = et.getText().toString();
+                                      pendingInputDone = true;
+                                  }
+                              })
+                              .setNegativeButton("Annulla", null)
+                              .create();
+                          dlg.show();
+                          et.requestFocus();
+                          android.view.inputmethod.InputMethodManager imm = (android.view.inputmethod.InputMethodManager) getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
+                          if (imm != null) imm.showSoftInput(et, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+                      }
+                  });
+              }
+
+              public String pollInputDialog() {
+                  if (!pendingInputDone) return null;
+                  pendingInputDone = false;
+                  return pendingInputText;
+              }
+
+              public static String callGeminiHttp(String urlStr, String apiKey, String jsonBody) {
+                  try {
+                      java.net.URL url = new java.net.URL(urlStr);
+                      java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+                      conn.setRequestMethod("POST");
+                      conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                      conn.setRequestProperty("x-goog-api-key", apiKey);
+                      conn.setConnectTimeout(15000);
+                      conn.setReadTimeout(20000);
+                      conn.setDoOutput(true);
+                      java.io.OutputStream os = conn.getOutputStream();
+                      os.write(jsonBody.getBytes("UTF-8"));
+                      os.close();
+                      int code = conn.getResponseCode();
+                      java.io.InputStream is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
+                      java.io.BufferedReader br = new java.io.BufferedReader(new java.io.InputStreamReader(is, "UTF-8"));
+                      StringBuilder sb = new StringBuilder();
+                      String line;
+                      while ((line = br.readLine()) != null) sb.append(line);
+                      br.close();
+                      if (code >= 200 && code < 300) return sb.toString();
+                      return "HTTP_ERR_" + code + ": " + sb.toString();
+                  } catch (Exception e) {
+                      return "HTTP_ERR: " + e.toString();
+                  }
+              }
+          """
+          for p in glob.glob("android-build/app/src/main/java/**/NativeLoader.java", recursive=True):
+              txt = open(p).read()
+              hook = "super.onCreate(savedInstanceState);"
+              patch = hook + "\n        if (android.os.Build.VERSION.SDK_INT >= 28) { android.view.WindowManager.LayoutParams lp = getWindow().getAttributes(); lp.layoutInDisplayCutoutMode = android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES; getWindow().setAttributes(lp); }"
+              if hook in txt: txt = txt.replace(hook, patch, 1)
+              idx = txt.rfind("}")
+              if idx != -1 and "callGeminiHttp" not in txt: txt = txt[:idx] + java_methods + "\n}\n"
+              open(p, "w").write(txt)
+          '
+          mkdir -p android-build/app/src/main/java/com/pallavspalla/game
+          cp android/GameUtils.kt android-build/app/src/main/java/com/pallavspalla/game/
+      - working-directory: android-build
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+      - name: Collect APK
+        run: |
+          mkdir -p apk-out
+          find android-build -name "*.apk" -exec cp {} apk-out/ \;
+          ls -la apk-out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PallaVsPalla-Android-APK
+          path: apk-out/*.apk
+          if-no-files-found: error

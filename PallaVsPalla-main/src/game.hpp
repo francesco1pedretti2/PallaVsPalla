@@ -1,0 +1,134 @@
+#ifndef GAME_HPP
+#define GAME_HPP
+#include "raylib.h"
+#include "audio_synth.h"
+#include "ball_vm.hpp"
+#include "ai_client.hpp"
+#include <atomic>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+constexpr int VIRT_H = 600;
+enum class GameState { LOBBY, COLLECTION, AI_CHAT, RPS, DRAFT, ALL_PICK, AIM, ARENA, ROUND_END, UPGRADE, RESULT };
+enum class GameMode { MODE_1V1=0, MODE_2V2, MODE_FUSION, MODE_RANKED, MODE_TOURNAMENT, MODE_RPS };
+
+struct InputState {
+    Vector2 pos{0,0}; bool pressed=false, down=false; float wheel=0, dragDeltaY=0;
+    int keyChar=0; bool backspace=false, enter=false;
+    bool nativeTextReady=false; std::string nativeText;
+};
+struct BallDef {
+    std::string id, name; Rarity rarity=Rarity::Raro; Color color=WHITE; int hp=100, dmg=8;
+    float speedMult=1.0f, baseRadius=1.15f; std::string visualStyle="none";
+    bool isCustom=false; std::string customPrompt; std::vector<ScriptRule> scriptRules; std::string desc;
+};
+struct Fighter {
+    const BallDef* def=nullptr; const BallDef* fusedDef=nullptr; const BallDef* stolenDef=nullptr;
+    int team=0; bool isMinion=false; Vector2 pos{0,0}, vel{0,0}; float r=1.15f;
+    int hp=100, maxHp=100, bonusDmg=0, shield=0; float speedMult=1.0f;
+    float stun=0, slow=0, poison=0, poisonDps=4.0f, regen=0, timerA=0, timerB=0, timerAux=0, angle=0, look=0;
+    int blades=0, fibA=1, fibB=1, chargeStack=1, verityLvl=1, reforgeLvl=0, customReflect=0;
+    int bounceCount=0, hitCount=0, hurtCount=0;
+    bool splitDone=false, startDone=false; float dashBoost=0, hitFlash=0, sqX=1, sqY=1;
+    float vars[6]={0,0,0,0,0,0};
+    std::vector<ScriptRule> runtimeRules; std::vector<float> ruleTimers; std::vector<bool> ruleOnce, rulePrevWhen;
+    std::vector<Vector2> tail, trail;
+};
+struct Projectile { int team=0, ownerIdx=-1; Vector2 pos{0,0}, vel{0,0}; int dmg=5; Color color=WHITE; float r=0.22f; int bounces=0; float life=3; bool homing=false, pierce=false, hookPull=false, poisonHit=false, healOwner=false; std::vector<int> hitIds; };
+enum class HazardType { WEB, DARK_WEB, RAIL, DICE, BOMB, CACTUS, SHACKLE, SPIKE, POISON_SPIKE, FROST, ACID, TURRET, CANNON, WDC_CELL, GRAVE_STONE, POTION_HEAL, POTION_POISON, SLIME_BLOB };
+struct Hazard { HazardType type=HazardType::WEB; int team=0, ownerIdx=-1; Vector2 pos{0,0}, vel{0,0}; float w=0, h=0, r=0.9f; int val=1; float life=5, tick=0; };
+struct LaserBeam { int team=0, ownerIdx=-1; Vector2 p1{0,0}, p2{0,0}; float life=0.3f; int dmg=9; Color color=WHITE; std::vector<int> hitIds; };
+struct ContinuousBeam { int team=0, ownerIdx=-1; float life=3.0f, tick=0, spinAngle=0, spinRate=0; int dmg=5, bounces=3; bool track=true; Color color=WHITE; };
+struct BlackHole { int team=0, ownerIdx=-1; Vector2 pos{0,0}; float life=4.0f, tick=0, force=12, rad=3.5f; int dmg=6; Color color=PURPLE; };
+struct TempWall { int team=0; Rectangle rect{}; float life=5.0f; bool reflectProj=true; Color color=WHITE; };
+struct TimeField { int ownerTeam=0; float life=2.5f, scale=0.05f; bool affectAll=false; };
+struct GravityField { int ownerTeam=0; float life=3.0f, gx=0, gy=9.0f; bool affectAll=false; };
+struct Particle { Vector2 pos{0,0}, vel{0,0}; float y=0.6f, vy=2.0f, life=0.4f, maxLife=0.4f; Color color=WHITE; float r=0.14f; };
+struct Shockwave { Vector2 pos{0,0}; float r=0.4f, maxR=2.6f; Color color=WHITE; float life=0.3f, maxLife=0.3f; };
+struct FloatText { Vector2 pos{0,0}; float y=1.8f; std::string text; Color color=WHITE; float life=0.8f; };
+struct PairCooldown { int a=0, b=0, slot=0; float lastTime=-10; };
+
+class ArenaMatch {
+public:
+    Rectangle bounds{-7.0f, -7.0f, 14.0f, 14.0f};
+    bool demo=false, ranked=false, suddenDeath=false, ended=false;
+    float time=0, hitstop=0, shake=0, wallFlash[4]={0,0,0,0}; int winnerTeam=-1;
+    std::vector<Fighter> fighters; std::vector<Projectile> projectiles; std::vector<Hazard> hazards;
+    std::vector<LaserBeam> lasers; std::vector<ContinuousBeam> contBeams;
+    std::vector<BlackHole> blackHoles; std::vector<TempWall> tempWalls;
+    std::vector<TimeField> timeFields; std::vector<GravityField> gravFields;
+    std::vector<Particle> particles; std::vector<Shockwave> shockwaves;
+    std::vector<FloatText> texts; std::vector<PairCooldown> cooldowns;
+
+    void Init(const std::vector<std::pair<const BallDef*, const BallDef*>>& allies, const std::vector<std::pair<const BallDef*, const BallDef*>>& enemies, bool isDemo, bool isRanked, float allyAimAng, int allyUpgHp, int allyUpgDmg, float allyUpgSpd, float allyRegen);
+    void Update(float dt, const GameAudio* audio, bool soundOn);
+    void Draw3D(const Camera3D& cam, float globalTime) const;
+    void DrawOverlay2D(const Camera3D& cam, const Font& font, int virtW) const;
+private:
+    Fighter MakeFighter(const BallDef* def, const BallDef* fused, int team, float x, float y, float ang, bool minion);
+    int NearestEnemy(int idx) const;
+    EvalContext MakeCtx(int idx, int enemyIdx, float loopI = 0.0f) const;
+    std::vector<Vector2> ComputeBounceRay(Vector2 start, float angle, int bounces) const;
+    void SpawnParticles(Vector2 p, Color c, int count, float speed);
+    void AddText(Vector2 p, const std::string& txt, Color c);
+    void Damage(int targetIdx, int amount, int attackerIdx, const char* label, bool heavy, bool ignoreShield, const GameAudio* audio, bool soundOn);
+    void RunWallAbility(int idx, const BallDef* bdef, const GameAudio* audio, bool soundOn);
+    void OnWallBounce(int idx, const GameAudio* audio, bool soundOn);
+    void RunTickAbility(int idx, const BallDef* bdef, float& timer, float dt, int tIdx, const GameAudio* audio, bool soundOn);
+    void TriggerVmEvent(int idx, VmTrig trig, int otherIdx, const GameAudio* audio, bool soundOn);
+    void ExecuteVmRule(int idx, const ScriptRule& r, int otherIdx, const GameAudio* audio, bool soundOn);
+    void CheckOrbitHits(int idx, float dist, int dmg, int count, int slotBase, const GameAudio* audio, bool soundOn);
+    void ContactHit(int atkIdx, int defIdx, const GameAudio* audio, bool soundOn);
+    void ApplyBallContactEffect(int atkIdx, int defIdx, const BallDef* bdef, const GameAudio* audio, bool soundOn);
+    bool CooldownReady(int a, int b, int slot, float minGap);
+};
+
+struct SaveData { int wins=0, streak=0, rp=0, level=1, xp=0; std::vector<std::string> customIds; };
+
+class PallaGame {
+public:
+    void Init(const std::string& savePath, const std::string& customPath, const std::string& keyPath);
+    void Update(float dt, const InputState& in, int virtW);
+    void Draw(int virtW);
+    void Shutdown();
+private:
+    Font uiFont{}; bool customFontLoaded=false;
+    GameAudio audio{}; bool soundOn=true; SaveData save; std::string saveFile, customFile, keyFile;
+    GameState state=GameState::LOBBY; GameMode mode=GameMode::MODE_1V1;
+    int simSpeed=1; float globalTime=0, scrollY=0, chatScrollY=0;
+    ArenaMatch demoMatch, activeMatch;
+    RenderTexture2D previewTex{};
+
+    int allyHearts=3, enemyHearts=3, roundNum=1, lastRoundWinner=0; float roundBannerTimer=0;
+    std::vector<const BallDef*> draftChoices; const BallDef* selectedPrimary=nullptr; const BallDef* selectedSecondary=nullptr;
+    std::vector<std::pair<const BallDef*, const BallDef*>> roundEnemies; const BallDef* roundAlly=nullptr;
+    bool pickingSecondFusion=false; float aimAngle=0, aimTimer=8.0f;
+    int upgHp=0, upgDmg=0; float upgSpd=1.0f, upgRegen=0; int upgOptions[3]={0,1,2};
+    int rpsPlayer=-1, rpsEnemy=-1, rpsOutcome=0; float rpsShowTimer=0;
+
+    BallDef draftCustom; std::vector<ChatTurn> chatHistory; std::string chatInput, geminiApiKey;
+    int focusField = 0; // 0=none, 1=chatInput, 2=apiKeyInput
+    std::atomic<bool> aiBusy{false}; std::mutex aiMutex; std::string aiRawReply; bool aiReplyReady=false; std::thread aiThread;
+
+    std::string toastMsg; float toastTimer=0;
+    struct { bool won=false; int xp=0, rpDelta=0; bool levelUp=false; float duration=0; } resultInfo;
+
+    Camera3D MakeArenaCamera(float shake) const;
+    void LoadUiFont();
+    void DrawBallCard(const BallDef* def, Rectangle r, float t) const;
+    void OpenAiChatStudio();
+    void SendAiChatMessage();
+    void StartGeminiRequest();
+    void HandleAiReply(const std::string& txt);
+    void SaveCustomBall(bool testImmediately);
+    void LoadCustomBalls(); void WriteCustomBalls() const;
+    void LoadSave(); void WriteSave() const; void LoadKey(); void WriteKey() const;
+    void SetToast(const std::string& msg);
+    void StartNewMatch(); void PrepareNextRound(); void RollDraftThree(); void BeginAimPhase();
+    void LaunchRound(); void OnRoundEnded(); void FinishMatch(bool won);
+    void DrawPreviewBall3D(const BallDef* bdef, float t);
+};
+#endif

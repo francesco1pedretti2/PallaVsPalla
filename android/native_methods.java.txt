@@ -1,0 +1,96 @@
+
+    // ===== Aggiunto da android/patch_android.py: tastiera nativa + HTTP per Gemini =====
+    private volatile String pendingInputText = "";
+    private volatile boolean pendingInputDone = false;
+
+    public void openInputDialog(final String title, final String initial) {
+        pendingInputDone = false;
+        final NativeLoader self = this;
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                final android.widget.EditText et = new android.widget.EditText(self);
+                et.setText(initial);
+                et.setSelection(initial.length());
+                et.setSingleLine(false);
+                et.setMaxLines(5);
+                et.setTextColor(0xFFFFFFFF);
+                et.setBackgroundColor(0xFF1A2238);
+                et.setPadding(28, 28, 28, 28);
+                android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(self, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle(title)
+                    .setView(et)
+                    .setPositiveButton("OK", new android.content.DialogInterface.OnClickListener() {
+                        @Override public void onClick(android.content.DialogInterface d, int w) {
+                            pendingInputText = et.getText().toString();
+                            pendingInputDone = true;
+                        }
+                    })
+                    .setNegativeButton("Annulla", null)
+                    .create();
+                dlg.show();
+                et.requestFocus();
+                android.view.inputmethod.InputMethodManager imm = (android.view.inputmethod.InputMethodManager) getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
+                if (imm != null) imm.showSoftInput(et, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+            }
+        });
+    }
+
+    public String pollInputDialog() {
+        if (!pendingInputDone) return null;
+        pendingInputDone = false;
+        return pendingInputText;
+    }
+
+    // Tutti i caratteri non ASCII diventano \uXXXX: cosi' il codice nativo (JNI) riceve sempre ASCII puro.
+    private static String asciiEscape(String s) {
+        StringBuilder sb = new StringBuilder(s.length() + 16);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 128) {
+                sb.append(c);
+            } else {
+                sb.append((char) 92).append('u');
+                String h = Integer.toHexString(c);
+                for (int k = h.length(); k < 4; k++) sb.append('0');
+                sb.append(h);
+            }
+        }
+        return sb.toString();
+    }
+
+    // Richiesta HTTP generica (GET per la lista modelli, POST per generateContent).
+    // Ritorna "CODICE\nCORPO" (CODICE = 0 se errore di rete).
+    public static String callHttp(String method, String urlStr, String apiKey, String body) {
+        java.net.HttpURLConnection conn = null;
+        try {
+            java.net.URL url = new java.net.URL(urlStr);
+            conn = (java.net.HttpURLConnection) url.openConnection();
+            conn.setRequestMethod(method);
+            conn.setRequestProperty("x-goog-api-key", apiKey);
+            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(120000);
+            if (body != null && body.length() > 0) {
+                conn.setDoOutput(true);
+                java.io.OutputStream os = conn.getOutputStream();
+                os.write(body.getBytes("UTF-8"));
+                os.close();
+            }
+            int code = conn.getResponseCode();
+            java.io.InputStream is = (code >= 200 && code < 400) ? conn.getInputStream() : conn.getErrorStream();
+            String text = "";
+            if (is != null) {
+                java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
+                is.close();
+                text = new String(bo.toByteArray(), "UTF-8");
+            }
+            return code + "\n" + asciiEscape(text);
+        } catch (Exception e) {
+            return "0\n" + asciiEscape(String.valueOf(e));
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
