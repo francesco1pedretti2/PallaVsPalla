@@ -41,7 +41,7 @@
         return pendingInputText;
     }
 
-    // Tutti i caratteri non ASCII diventano \uXXXX: cosi' il codice nativo (JNI) riceve sempre ASCII puro.
+    // Tutti i caratteri non ASCII diventano uXXXX: cosi' il codice nativo (JNI) riceve sempre ASCII puro.
     private static String asciiEscape(String s) {
         StringBuilder sb = new StringBuilder(s.length() + 16);
         for (int i = 0; i < s.length(); i++) {
