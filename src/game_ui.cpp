@@ -24,31 +24,67 @@ void PallaGame::LoadSave() { std::ifstream f(saveFile); if (!f.is_open()) return
 void PallaGame::WriteSave() const { std::ofstream f(saveFile); if (!f.is_open()) return; f << save.wins << " " << save.streak << " " << save.rp << " " << save.level << " " << save.xp << "\n"; }
 void PallaGame::SetToast(const std::string& msg) { toastMsg = msg; toastTimer = 3.0f; }
 
+// Testo "formato AI" di una palla: serve a Gemini (palla attuale), al salvataggio e alla descrizione mostrata in elenco.
+static std::string ScriptText(const BallDef& d) {
+    char b[160]; std::string t;
+    t += "CHAT: " + (d.desc.empty() ? std::string("Palla personalizzata") : d.desc) + "\n";
+    t += "NAME: " + d.name + "\n";
+    std::string rn = RarityName(d.rarity); for (char& c : rn) c = (char)std::toupper((unsigned char)c);
+    t += "RARITY: " + rn + "\n";
+    std::snprintf(b, sizeof(b), "HP: %d\nDMG: %d\nSPEED: %.2f\nSIZE: %.2f\nCOLOR: %d,%d,%d\n", d.hp, d.dmg, d.speedMult, d.baseRadius, (int)d.color.r, (int)d.color.g, (int)d.color.b);
+    t += b; t += "STYLE: " + d.visualStyle + "\n"; t += RulesToText(d.scriptRules);
+    return t;
+}
+
+static void WriteBallBlock(std::ostream& f, const BallDef& b) {
+    f << b.id << " " << (int)b.rarity << " " << (int)b.color.r << " " << (int)b.color.g << " " << (int)b.color.b
+      << " " << b.hp << " " << b.dmg << " " << b.speedMult << " " << b.baseRadius << " " << (b.visualStyle.empty() ? "none" : b.visualStyle) << " " << b.scriptRules.size() << "\n";
+    std::string nm = b.name; for (char& c : nm) if (c == '\n' || c == '\r') c = ' ';
+    std::string enc; { std::istringstream is(b.customPrompt); std::string l; while (std::getline(is, l)) { while (!l.empty() && l.back() == '\r') l.pop_back(); enc += l + "\x01"; } }
+    f << nm << "\n" << enc << "\n" << SerializeScriptRules(b.scriptRules);
+}
+static bool ReadBallBlock(std::istream& f, BallDef& b) {
+    int rar = 5, r = 34, g = 211, bl = 238, rc = 0; std::string hdr; if (!std::getline(f, hdr)) return false;
+    std::istringstream iss(hdr); iss >> b.id >> rar >> r >> g >> bl >> b.hp >> b.dmg >> b.speedMult >> b.baseRadius >> b.visualStyle >> rc;
+    if (b.id.empty()) return false;
+    b.rarity = (Rarity)std::max(0, std::min(5, rar)); b.color = { (unsigned char)r, (unsigned char)g, (unsigned char)bl, 255 };
+    std::getline(f, b.name); std::getline(f, b.customPrompt); for (char& c : b.customPrompt) if (c == '\x01') c = '\n';
+    std::string block; for (int k = 0; k < rc; k++) { std::string rl; if (!std::getline(f, rl)) break; block += rl + "\n"; }
+    b.scriptRules = DeserializeScriptRules(block);
+    ParsedBallScript ps = ParseAIScript(b.customPrompt); if (!ps.chatMsg.empty()) b.desc = ps.chatMsg;
+    return true;
+}
+
 void PallaGame::LoadCustomBalls() {
     std::ifstream f(customFile); if (!f.is_open()) return; int count = 0; if (!(f >> count)) return;
     std::string dummy; std::getline(f, dummy);
     for (int i = 0; i < count; i++) {
-        BallDef b; b.isCustom = true; int rar = 5, r = 34, g = 211, bl = 238, rc = 0; std::string hdr; if (!std::getline(f, hdr)) break;
-        std::istringstream iss(hdr); iss >> b.id >> rar >> r >> g >> bl >> b.hp >> b.dmg >> b.speedMult >> b.baseRadius >> b.visualStyle >> rc;
-        b.rarity = (Rarity)std::max(0, std::min(5, rar)); b.color = { (unsigned char)r, (unsigned char)g, (unsigned char)bl, 255 };
-        std::getline(f, b.name); std::getline(f, b.customPrompt); for (char& c : b.customPrompt) if (c == '\x01') c = '\n';
-        std::string block; for (int k = 0; k < rc; k++) { std::string rl; if (!std::getline(f, rl)) break; block += rl + "\n"; }
-        b.scriptRules = DeserializeScriptRules(block); b.desc = "Palla creata con l'AI (" + std::to_string(b.scriptRules.size()) + " regole)";
-        ParsedBallScript ps = ParseAIScript(b.customPrompt); if (!ps.chatMsg.empty()) b.desc = ps.chatMsg;
+        BallDef b; b.isCustom = true; if (!ReadBallBlock(f, b)) break;
+        if (b.desc.empty()) b.desc = "Palla creata con l'AI (" + std::to_string(b.scriptRules.size()) + " regole)";
         GetBallCatalog().push_back(b);
     }
 }
 void PallaGame::WriteCustomBalls() const {
     std::ofstream f(customFile); if (!f.is_open()) return;
     std::vector<const BallDef*> cs; for (const auto& b : GetBallCatalog()) if (b.isCustom) cs.push_back(&b);
-    f << cs.size() << "\n";
-    for (const auto* b : cs) {
-        f << b->id << " " << (int)b->rarity << " " << (int)b->color.r << " " << (int)b->color.g << " " << (int)b->color.b
-          << " " << b->hp << " " << b->dmg << " " << b->speedMult << " " << b->baseRadius << " " << b->visualStyle << " " << b->scriptRules.size() << "\n";
-        std::string nm = b->name; for (char& c : nm) if (c == '\n' || c == '\r') c = ' ';
-        // ParseAIScript ha bisogno delle righe: le salviamo separate da \x01 e le ripristiniamo al caricamento
-        std::string enc; { std::istringstream is(b->customPrompt); std::string l; while (std::getline(is, l)) { while (!l.empty() && l.back() == '\r') l.pop_back(); enc += l + "\x01"; } }
-        f << nm << "\n" << enc << "\n" << SerializeScriptRules(b->scriptRules);
+    f << cs.size() << "\n"; for (const auto* b : cs) WriteBallBlock(f, *b);
+}
+// Modifiche alle palle del gioco (nome, aspetto, statistiche, regole extra): file a parte, l'abilita' integrata resta quella originale.
+void PallaGame::LoadEdits() {
+    std::ifstream f(editsFile); if (!f.is_open()) return; int count = 0; if (!(f >> count)) return;
+    std::string dummy; std::getline(f, dummy);
+    for (int i = 0; i < count; i++) {
+        BallDef e; if (!ReadBallBlock(f, e)) break;
+        for (auto& b : GetBallCatalog()) if (!b.isCustom && b.id == e.id) {
+            b.name = e.name; b.rarity = e.rarity; b.color = e.color; b.hp = e.hp; b.dmg = e.dmg; b.speedMult = e.speedMult; b.baseRadius = e.baseRadius;
+            b.visualStyle = e.visualStyle; b.scriptRules = e.scriptRules; if (!e.desc.empty()) b.desc = e.desc; editedIds.insert(b.id);
+        }
+    }
+}
+void PallaGame::WriteEdits() const {
+    std::ofstream f(editsFile); if (!f.is_open()) return; f << editedIds.size() << "\n";
+    for (const auto& id : editedIds) for (const auto& b : GetBallCatalog()) if (b.id == id) {
+        BallDef c = b; c.customPrompt = ScriptText(b); WriteBallBlock(f, c);
     }
 }
 
@@ -56,10 +92,13 @@ void PallaGame::WriteCustomBalls() const {
 //  Init / sprite
 // ============================================================================
 void PallaGame::Init(const std::string& dataDir) {
-    saveFile = dataDir + "palla_vs_palla_save.txt"; customFile = dataDir + "palla_vs_palla_custom.txt"; keyFile = dataDir + "palla_gemini_key.txt";
+    saveFile = dataDir + "palla_vs_palla_save.txt"; customFile = dataDir + "palla_vs_palla_custom.txt"; keyFile = dataDir + "palla_gemini_key.txt"; editsFile = dataDir + "palla_vs_palla_edits.txt";
     audio = Audio_Init(); ui.Init(); GfxInit();
     previewTex = LoadRenderTexture(640, 480); SetTextureFilter(previewTex.texture, TEXTURE_FILTER_BILINEAR);
-    LoadKey(); LoadCustomBalls(); LoadSave(); modalKey = geminiApiKey;
+    trainDummy.id = "__dummy"; trainDummy.name = "Sacco 1000 HP"; trainDummy.isDummy = true; trainDummy.hp = 1000; trainDummy.dmg = 0; trainDummy.speedMult = 0.0f;
+    trainDummy.baseRadius = 1.4f; trainDummy.color = { 148, 163, 184, 255 }; trainDummy.rarity = Rarity::Raro; trainDummy.visualStyle = "none"; trainDummy.desc = "Bersaglio fermo per provare le palle.";
+    for (const auto& b : GetBallCatalog()) originals[b.id] = b;     // copia di fabbrica (per "Ripristina originale")
+    LoadKey(); LoadCustomBalls(); LoadEdits(); LoadSave(); modalKey = geminiApiKey;
     const auto& db = GetBallCatalog();
     demoMatch.Init({ { &db[0], nullptr } }, { { &db[1], nullptr } }, true, false, 0.4f, 0, 0, 1.0f, 0.0f);
     for (const auto& b : db) BuildSprite(&b);
@@ -70,8 +109,10 @@ void PallaGame::Shutdown() {
     sprites.clear(); if (previewTex.id > 0) UnloadRenderTexture(previewTex);
     ui.Unload(); Audio_Unload(&audio);
 }
-void PallaGame::BuildSprite(const BallDef* def) {
-    if (!def || sprites.count(def->id)) return;
+void PallaGame::BuildSprite(const BallDef* def, bool force) {
+    if (!def) return;
+    auto it = sprites.find(def->id);
+    if (it != sprites.end()) { if (!force) return; UnloadRenderTexture(it->second); sprites.erase(it); }
     RenderTexture2D rt = LoadRenderTexture(256, 256); SetTextureFilter(rt.texture, TEXTURE_FILTER_BILINEAR);
     RenderBallSprite(def, rt, 0.9f, false); sprites[def->id] = rt;
 }
@@ -111,6 +152,7 @@ void PallaGame::LaunchRound() {
     state = GameState::ARENA;
 }
 void PallaGame::OnRoundEnded() {
+    if (training) { OnTrainRoundEnded(); return; }
     lastRoundWinner = activeMatch.winnerTeam; if (lastRoundWinner == 0) enemyHearts--; else allyHearts--;
     if (allyHearts <= 0 || enemyHearts <= 0) FinishMatch(enemyHearts <= 0);
     else { roundNum++; roundBannerTimer = 1.7f; state = GameState::ROUND_END; SND(lastRoundWinner == 0 ? SFX_WIN : SFX_KO); }
@@ -132,7 +174,7 @@ void PallaGame::OpenAiChatStudio() {
     draftCustom.hp = 120; draftCustom.dmg = 8; draftCustom.speedMult = 1.0f; draftCustom.baseRadius = 1.15f; draftCustom.visualStyle = "none"; draftCustom.isCustom = true;
     chatHistory.clear();
     ChatTurn g; g.isUser = false; g.text = "Ciao! Descrivimi la palla che vuoi: buchi neri, stop del tempo, laser rimbalzanti, ruba-abilità... La creo e la vedi subito in 3D.";
-    chatHistory.push_back(g); chatInput.clear(); chatStick = true; nativeTarget = 0;
+    chatHistory.push_back(g); chatInput.clear(); chatStick = true; nativeTarget = 0; aiEditMode = false;
     state = GameState::AI_CHAT; SND(SFX_CLICK);
     if (geminiApiKey.empty()) { keyModal = true; modalKey.clear(); modalError.clear(); modalOffer = false; }
 }
@@ -141,7 +183,8 @@ void PallaGame::StartAiJob(AiJob kind) {
     if (aiBusy.load()) return;
     if (aiThread.joinable()) aiThread.join();
     aiBusy.store(true); aiBusyTime = 0.0f;
-    std::string key = (kind == AiJob::VERIFY) ? modalKey : geminiApiKey, cur = draftCustom.customPrompt; std::vector<ChatTurn> hist = chatHistory;
+    std::string key = (kind == AiJob::VERIFY) ? modalKey : geminiApiKey, cur = draftCustom.customPrompt;
+    if (aiEditMode && editBuiltin && kind == AiJob::CHAT) cur += "\nNOTA: questa e' una palla del gioco con un'abilita integrata che NON puoi cambiare ne rimuovere. Puoi modificare statistiche e aspetto e AGGIUNGERE regole extra; se l'utente non chiede abilita nuove, non scrivere righe RULE.\n"; std::vector<ChatTurn> hist = chatHistory;
     aiThread = std::thread([this, kind, key, hist, cur]() {
         AiResult r;
         try { r = (kind == AiJob::VERIFY) ? GeminiCheckKey(key) : GeminiGenerate(key, hist, cur); }
@@ -180,8 +223,8 @@ void PallaGame::HandleAiResult(const AiResult& r, AiJob kind) {
     draftCustom.rarity = ps.rarity; draftCustom.hp = ps.hp; draftCustom.dmg = ps.dmg; draftCustom.speedMult = ps.speed; draftCustom.baseRadius = ps.size;
     draftCustom.color = ps.color; draftCustom.visualStyle = ps.style; draftCustom.scriptRules = ps.rules; draftCustom.isCustom = true; draftCustom.customPrompt = r.text;
     std::string say = ps.chatMsg.empty() ? ("Creata '" + draftCustom.name + "' con " + std::to_string(ps.rules.size()) + " regole!") : ps.chatMsg;
-    if (!ps.warnings.empty()) { say += "  [Attenzione: " + std::to_string(ps.warnings.size()) + " regola/e ignorata/e: " + ps.warnings[0] + ". Chiedimi di correggere.]"; }
     draftCustom.desc = say;
+    if (!ps.warnings.empty()) { say += "  [Attenzione: " + std::to_string(ps.warnings.size()) + " regola/e ignorata/e: " + ps.warnings[0] + ". Chiedimi di correggere.]"; }
     ChatTurn m; m.isUser = false; m.text = r.text; m.shown = say; chatHistory.push_back(m); chatStick = true; SND(SFX_WIN);
 }
 
@@ -209,6 +252,7 @@ void PallaGame::AppendTyped(std::string& t, size_t maxLen, bool singleLine) {
     auto add = [&](const std::string& s) { for (char c : s) { if ((unsigned char)c < 32 && c != '\n') { if (c == '\t') t.push_back(' '); continue; } if (c == '\n' && singleLine) { t.push_back(' '); continue; } if (t.size() < maxLen) t.push_back(c); } };
     if (!in.typed.empty()) add(in.typed);
     if (in.ctrlV) { const char* cl = GetClipboardText(); if (cl) add(cl); }
+    while (!t.empty()) { size_t k = t.size() - 1; while (k > 0 && ((unsigned char)t[k] & 0xC0) == 0x80) k--; unsigned char c = (unsigned char)t[k]; size_t need = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1; if (t.size() - k < need) t.erase(k); else break; }
 }
 
 // ============================================================================
@@ -216,8 +260,10 @@ void PallaGame::AppendTyped(std::string& t, size_t maxLen, bool singleLine) {
 // ============================================================================
 void PallaGame::HandleBack() {
     if (keyModal) { keyModal = false; return; }
+    if (training && (state == GameState::ARENA || state == GameState::ROUND_END || state == GameState::RESULT)) { ExitTraining(); return; }
     switch (state) {
-        case GameState::AI_CHAT: Go(GameState::COLLECTION); break;
+        case GameState::AI_CHAT: if (aiEditMode) { state = GameState::EDIT; } else Go(GameState::COLLECTION); break;
+        case GameState::EDIT: Go(GameState::COLLECTION); break;
         case GameState::COLLECTION: case GameState::DRAFT: case GameState::RPS: case GameState::AIM: case GameState::ARENA: case GameState::RESULT: Go(GameState::LOBBY); break;
         default: break;
     }
@@ -234,10 +280,21 @@ void PallaGame::Logic(float dt) {
     if (in.nativeTextReady) {
         if (nativeTarget == 1) { chatInput = in.nativeText; SendAiChatMessage(); }
         else if (nativeTarget == 2) { modalKey = in.nativeText; modalError.clear(); }
+        else if (nativeTarget == 3) { editDraft.name = in.nativeText.substr(0, 40); }
+        else if (nativeTarget == 4) { editDraft.desc = in.nativeText.substr(0, 200); }
+        else if (nativeTarget == 5) {
+            ParsedBallScript ps = ParseAIScript(in.nativeText);
+            if (!ps.rules.empty() || in.nativeText.find_first_not_of(" \n\r\t") == std::string::npos) { editDraft.scriptRules = ps.rules; SetToast(ps.warnings.empty() ? "Regole aggiornate" : "Regole aggiornate (" + std::to_string(ps.warnings.size()) + " ignorate)"); }
+            else SetToast("Nessuna regola valida nel testo");
+        }
         nativeTarget = 0;
     }
     if (keyModal) { AppendTyped(modalKey, 220, true); if (in.enter && !aiBusy.load() && !modalKey.empty()) { modalError.clear(); StartAiJob(AiJob::VERIFY); } }
     else if (state == GameState::AI_CHAT) { AppendTyped(chatInput, 400, true); if (in.enter) SendAiChatMessage(); }
+    else if (state == GameState::EDIT && editFocus != 0) {
+        if (editFocus == 1) AppendTyped(editDraft.name, 22, true); else AppendTyped(editDraft.desc, 160, true);
+        if (in.enter) editFocus = 0;
+    }
     if (in.back) HandleBack();
 
     if (state == GameState::AIM) {
@@ -254,6 +311,7 @@ void PallaGame::Logic(float dt) {
     if (state == GameState::ROUND_END) {
         roundBannerTimer -= dt;
         if (roundBannerTimer <= 0.0f) {
+            if (training) { StartTrainRound(); return; }
             if (mode == GameMode::MODE_TOURNAMENT) { upgOptions[0] = rand() % 4; upgOptions[1] = (upgOptions[0] + 1) % 4; upgOptions[2] = (upgOptions[0] + 2) % 4; state = GameState::UPGRADE; }
             else PrepareNextRound();
         }
@@ -263,6 +321,7 @@ void PallaGame::Logic(float dt) {
     if (state == GameState::LOBBY) demoMatch.Update(dt, &audio, false);
     if (state == GameState::ARENA) {
         for (int s = 0; s < simSpeed; s++) if (!activeMatch.ended) activeMatch.Update(dt, &audio, soundOn);
+        if (training && !activeMatch.ended && activeMatch.time >= 60.0f) { activeMatch.ended = true; activeMatch.winnerTeam = -1; }   // limite di 60 s per round
         if (activeMatch.ended) OnRoundEnded();
     }
 }
@@ -277,6 +336,8 @@ void PallaGame::Frame(float dt, const InputState& in, float virtW, float uiScale
 
     // render-to-texture: sempre fuori da qualsiasi Begin/EndMode2D
     while (!spriteQueue.empty()) { BuildSprite(spriteQueue.back()); spriteQueue.pop_back(); }
+    while (!spriteRefresh.empty()) { BuildSprite(spriteRefresh.back(), true); spriteRefresh.pop_back(); }
+    if (state == GameState::EDIT) RenderBallSprite(&editDraft, previewTex, globalTime * 0.8f, true);
     if (state == GameState::AI_CHAT) RenderBallSprite(&draftCustom, previewTex, globalTime * 0.8f, true);
 
     ClearBackground(Pal::Bg0);
@@ -301,6 +362,7 @@ void PallaGame::Frame(float dt, const InputState& in, float virtW, float uiScale
         case GameState::ARENA: case GameState::ROUND_END: ScreenArena(); break;
         case GameState::UPGRADE: ScreenUpgrade(); break;
         case GameState::RESULT: ScreenResult(); break;
+        case GameState::EDIT: ScreenEdit(); break;
     }
     Toast();
     if (keyModal) KeyModal();
@@ -329,10 +391,11 @@ void PallaGame::TopBar(const char*, bool) {
 
 void PallaGame::Rail() {
     Rectangle r = { 14, 74, 204, H - 88 }; ui.Panel(r, 18, { 12, 18, 34, 232 }, Pal::Border, 1.2f);
-    bool inLobby = state == GameState::LOBBY;
-    if (ui.Button({ 24, 86, 184, 50 }, "BATTAGLIA", inLobby ? Pal::Blue : Pal::PanelHi, Pal::Text, 17)) { if (!inLobby) Go(GameState::LOBBY); }
+    bool inLobby = state == GameState::LOBBY, inPick = state == GameState::COLLECTION && collPick, inList = state == GameState::COLLECTION && !collPick;
+    if (ui.Button({ 24, 86, 184, 50 }, "BATTAGLIA", inLobby ? Pal::Blue : Pal::PanelHi, Pal::Text, 17)) { if (!inLobby) { collPick = false; Go(GameState::LOBBY); } }
     char nb[40]; std::snprintf(nb, sizeof(nb), "PALLE (%d)", (int)GetBallCatalog().size());
-    if (ui.Button({ 24, 144, 184, 50 }, nb, !inLobby ? Pal::Blue : Pal::PanelHi, Pal::Text, 17)) { if (inLobby) { Go(GameState::COLLECTION); collScroll = 0; } }
+    if (ui.Button({ 24, 144, 184, 50 }, nb, inList ? Pal::Blue : Pal::PanelHi, Pal::Text, 17)) { if (!inList) { collPick = false; Go(GameState::COLLECTION); collScroll = 0; } }
+    if (ui.Button({ 24, 202, 184, 50 }, "CAMPO DI PROVA", inPick ? Pal::Blue : Pal::PanelHi, inPick ? Pal::Text : Pal::Green, 15.5f)) { if (!inPick) { collPick = true; Go(GameState::COLLECTION); collScroll = 0; } }
     Rectangle p = { 24, r.y + r.height - 150, 184, 138 }; ui.Panel(p, 14, { 20, 28, 50, 255 }, { 60, 78, 120, 120 }, 1.0f, false);
     ui.Text("PROFILO", p.x + 14, p.y + 10, 13, Pal::Muted, true);
     char b[48];
@@ -378,12 +441,12 @@ void PallaGame::StatBars(const BallDef* d, Rectangle r) {
     }
 }
 
-void PallaGame::BallCard(const BallDef* def, Rectangle r, bool hl, bool showDesc) {
-    Color rc = RarityColor(def->rarity); bool held = ui.Held(r);
+int PallaGame::BallCard(const BallDef* def, Rectangle r, bool hl, bool showDesc, int buttons) {
+    Color rc = RarityColor(def->rarity); bool held = ui.Held(r) && buttons == 0;
     Rectangle q = r; if (held) { q.y += 2; }
     ui.Panel(q, 16, held ? Color{ 28, 38, 66, 255 } : Color{ 20, 28, 50, 250 }, hl ? rc : A(rc, 0.55f), hl ? 3.0f : 1.6f);
     DrawRectangleRounded({ q.x + 3, q.y + 3, q.width - 6, std::min(96.0f, q.height * 0.42f) }, 0.25f, 10, A(rc, 0.16f));
-    float s = std::min(q.width - 24.0f, std::min(120.0f, q.height * 0.5f)); Rectangle sp = { q.x + q.width * 0.5f - s * 0.5f, q.y + 6, s, s };
+    float s = std::min(q.width - 24.0f, std::min(120.0f, q.height * 0.46f)); Rectangle sp = { q.x + q.width * 0.5f - s * 0.5f, q.y + 6, s, s };
     const RenderTexture2D* rt = GetSprite(def);
     if (rt) DrawSprite(*rt, sp); else ui.Orb(sp.x + s * 0.5f, sp.y + s * 0.5f, s * 0.3f, def->color);
     const char* rn = RarityName(def->rarity); float pw = ui.Measure(rn, 11.5f, true).x + 18;
@@ -393,7 +456,17 @@ void PallaGame::BallCard(const BallDef* def, Rectangle r, bool hl, bool showDesc
     ui.TextC(ui.Fit(def->name, q.width - 20, 18, true).c_str(), q.x + q.width * 0.5f, ny + 9, 18, Pal::Text, true);
     char st[40]; std::snprintf(st, sizeof(st), "HP %d    DMG %d", def->hp, def->dmg);
     ui.TextC(st, q.x + q.width * 0.5f, ny + 32, 14, { 150, 190, 240, 255 }, true);
-    if (showDesc && q.y + q.height - (ny + 48) > 20) ui.Wrap(def->desc, q.x + 14, ny + 50, q.width - 28, 12.5f, Pal::Muted, true, false, std::max(1, (int)((q.y + q.height - ny - 56) / 16.0f)));
+    float bottom = q.y + q.height - (buttons ? 46.0f : 10.0f);
+    if (showDesc && bottom - (ny + 48) > 16) ui.Wrap(def->desc, q.x + 14, ny + 50, q.width - 28, 12.5f, Pal::Muted, true, false, std::max(1, (int)((bottom - ny - 50) / 16.0f)));
+    int res = 0;
+    if (buttons == 1) {
+        float bw = (q.width - 24 - 8) / 2.0f;
+        if (ui.Button({ q.x + 12, q.y + q.height - 40, bw, 30 }, "PROVA", { 26, 110, 78, 255 }, WHITE, 13.5f)) res = 2;
+        if (ui.Button({ q.x + 12 + bw + 8, q.y + q.height - 40, bw, 30 }, "MODIFICA", Pal::PanelHi, Pal::Cyan, 13.5f)) res = 1;
+    } else if (buttons == 2) {
+        if (ui.Button({ q.x + 12, q.y + q.height - 40, q.width - 24, 30 }, "PROVA CON QUESTA", { 26, 110, 78, 255 }, WHITE, 13.5f)) res = 2;
+    }
+    return res;
 }
 
 // ============================================================================
@@ -429,8 +502,8 @@ void PallaGame::ScreenCollection() {
     DrawRectangleGradientH(0, 0, (int)std::ceil(W), (int)std::ceil(H), { 5, 8, 18, 150 }, { 5, 8, 18, 60 });
     TopBar("", true); Rail();
     float cx = 236, cw = W - cx - 16;
-    ui.Text("ELENCO PALLE", cx, 74, 24, Pal::Text, true);
-    char cnt[40]; std::snprintf(cnt, sizeof(cnt), "%d palle sbloccate", (int)GetBallCatalog().size()); ui.Text(cnt, cx + 190, 82, 14, Pal::Muted);
+    if (collPick) { ui.Text("CAMPO DI PROVA", cx, 74, 24, Pal::Green, true); ui.Text("Scegli la tua palla: affronta un sacco fermo da 1000 HP. 3 round, puoi uscire quando vuoi.", cx + 250, 82, 14, Pal::Muted); }
+    else { ui.Text("ELENCO PALLE", cx, 74, 24, Pal::Text, true); char cnt[40]; std::snprintf(cnt, sizeof(cnt), "%d palle sbloccate", (int)GetBallCatalog().size()); ui.Text(cnt, cx + 190, 82, 14, Pal::Muted); }
     // filtri rarità
     const char* names[7] = { "TUTTE", RarityName(Rarity::Raro), RarityName(Rarity::SuperRaro), RarityName(Rarity::Epico), RarityName(Rarity::Mitico), RarityName(Rarity::Leggendario), RarityName(Rarity::Ultra) };
     float fx = cx, fy = 108; 
@@ -440,9 +513,9 @@ void PallaGame::ScreenCollection() {
         fx += w + 8;
     }
     Rectangle area = { cx, 148, cw, H - 148 - 10 };
-    int cols = std::max(2, (int)((cw + 14) / 214.0f)); float gap = 14, cwid = (cw - gap * (cols - 1)) / cols, ch = 240;
+    int cols = std::max(2, (int)((cw + 14) / 214.0f)); float gap = 14, cwid = (cw - gap * (cols - 1)) / cols, ch = 268;
     std::vector<const BallDef*> items; for (const auto& b : GetBallCatalog()) if (rarFilter < 0 || (int)b.rarity == rarFilter) items.push_back(&b);
-    int total = (int)items.size() + 1; int rows = (total + cols - 1) / cols; float contentH = rows * (ch + gap) + 8, maxScroll = std::max(0.0f, contentH - area.height);
+    int off = collPick ? 0 : 1; int total = (int)items.size() + off; int rows = (total + cols - 1) / cols; float contentH = rows * (ch + gap) + 8, maxScroll = std::max(0.0f, contentH - area.height);
     const InputState& in = ui.in;
     if (ui.enabled && ui.Inside(area, in.pos)) collScroll -= in.wheel * 60.0f;
     if (ui.enabled && in.down && ui.Inside(area, in.pressPos)) collScroll -= in.dragDy;
@@ -452,7 +525,7 @@ void PallaGame::ScreenCollection() {
         Rectangle r = { area.x + (i % cols) * (cwid + gap), area.y + (i / cols) * (ch + gap) - collScroll + 4, cwid, ch };
         if (r.y > area.y + area.height || r.y + r.height < area.y) continue;
         bool visible = ui.Inside(area, in.pos);
-        if (i == 0) {
+        if (i == 0 && !collPick) {
             bool held = ui.Held(r) && visible; Rectangle q = r; if (held) q.y += 2;
             ui.Panel(q, 16, { 14, 26, 46, 250 }, A(Pal::Cyan, 0.8f), 2.2f);
             DrawRectangleRounded({ q.x + 3, q.y + 3, q.width - 6, 100 }, 0.25f, 10, A(Pal::Cyan, 0.12f));
@@ -462,7 +535,9 @@ void PallaGame::ScreenCollection() {
             ui.Wrap("Descrivi una palla a Gemini e la vedi subito in 3D.", q.x + 16, q.y + 172, q.width - 32, 13, Pal::Muted, true, false, 3);
             if (ui.Click(r) && visible) { OpenAiChatStudio(); break; }
         } else {
-            const BallDef* d = items[i - 1]; BallCard(d, r, false, true);
+            const BallDef* d = items[i - off];
+            int act = BallCard(d, r, false, true, collPick ? 2 : 1);
+            if (act && visible) { if (act == 1) OpenEditor(const_cast<BallDef*>(d)); else StartTraining(*d, GameState::COLLECTION); break; }
         }
     }
     ui.ScissorEnd();
@@ -474,7 +549,7 @@ void PallaGame::ScreenCollection() {
 // ============================================================================
 void PallaGame::ScreenAiChat() {
     DrawRectangle(0, 0, (int)std::ceil(W), 58, { 8, 12, 24, 235 }); DrawRectangle(0, 57, (int)std::ceil(W), 1, { 255, 255, 255, 26 });
-    if (ui.Button({ 14, 9, 118, 40 }, "Indietro", Pal::PanelHi, Pal::Text, 16)) { Go(GameState::COLLECTION); return; }
+    if (ui.Button({ 14, 9, 118, 40 }, "Indietro", Pal::PanelHi, Pal::Text, 16)) { if (aiEditMode) state = GameState::EDIT; else Go(GameState::COLLECTION); return; }
     ui.Text("AI STUDIO", 148, 9, 26, Pal::Text, true);
     ui.Text(aiModel.empty() ? "creatore di palle con Gemini" : ("Gemini  -  " + aiModel).c_str(), 150, 36, 12.5f, Pal::Muted);
     bool hasKey = !geminiApiKey.empty();
@@ -547,10 +622,16 @@ void PallaGame::ScreenAiChat() {
     StatBars(&draftCustom, { side.x + 18, y2 + 62, side.width - 36, 96 });
     float dy = y2 + 168;
     if (has) { char rc[32]; std::snprintf(rc, sizeof(rc), "%d regole attive", (int)draftCustom.scriptRules.size()); ui.Text(rc, side.x + 18, dy, 12.5f, Pal::Cyan, true); }
-    float by = side.y + side.height - 12 - 50;
-    ui.Wrap(has ? draftCustom.desc : "Scrivi a Gemini cosa deve fare la tua palla: apparirà qui in 3D.", side.x + 18, dy + (has ? 20 : 0), side.width - 36, 13, Pal::Muted, true, false, std::max(2, (int)((by - 66 - dy - 22) / 17.0f)));
-    if (ui.Button({ side.x + 14, by - 58, side.width - 28, 50 }, "SALVA NELL'ELENCO", Pal::Blue, WHITE, 16, !has)) { SaveCustomBall(false); return; }
-    if (ui.Button({ side.x + 14, by, side.width - 28, 50 }, "TESTA SUBITO", Pal::Green, { 6, 30, 18, 255 }, 17, !has)) { SaveCustomBall(true); return; }
+    int nb = aiEditMode ? 3 : 2; float bh = 46.0f, bg = 8.0f, btop = side.y + side.height - 12 - nb * bh - (nb - 1) * bg;
+    ui.Wrap(has ? draftCustom.desc : "Scrivi a Gemini cosa deve fare la tua palla: apparirà qui in 3D.", side.x + 18, dy + (has ? 20 : 0), side.width - 36, 13, Pal::Muted, true, false, std::max(2, (int)((btop - 8 - dy - 22) / 17.0f)));
+    auto bt = [&](int i) { return Rectangle{ side.x + 14, btop + i * (bh + bg), side.width - 28, bh }; };
+    if (ui.Button(bt(0), "PROVA (campo di prova)", { 26, 110, 78, 255 }, WHITE, 16, !has)) { StartTraining(draftCustom, GameState::AI_CHAT); return; }
+    if (aiEditMode) {
+        if (ui.Button(bt(1), "APPLICA ALL'EDITOR", Pal::Blue, WHITE, 16, !has)) { ApplyAiDraftToEditor(); return; }
+        if (ui.Button(bt(2), "APPLICA E SALVA", Pal::Green, { 6, 30, 18, 255 }, 16, !has)) { ApplyAiDraftToEditor(); SaveEdit(); return; }
+    } else {
+        if (ui.Button(bt(1), "SALVA NELL'ELENCO", Pal::Green, { 6, 30, 18, 255 }, 16, !has)) { SaveCustomBall(false); return; }
+    }
 }
 
 // ============================================================================
@@ -679,6 +760,23 @@ void PallaGame::ScreenAim() {
 // ============================================================================
 void PallaGame::ScreenArena() {
     RenderArenaOverlay(activeMatch, curCam, ui); DrawVignette(ui, 90);
+    if (training) {
+        TrainHud();
+        if (state == GameState::ARENA) {
+            if (ui.Button({ W - 204.0f, H - 186.0f, 184, 48 }, simSpeed == 1 ? "Velocità x1" : "Velocità x2", simSpeed == 2 ? Pal::Orange : Pal::PanelHi, simSpeed == 2 ? Color{ 40, 20, 4, 255 } : Pal::Text, 16)) { simSpeed = (simSpeed == 1) ? 2 : 1; SND(SFX_CLICK); }
+            if (ui.Button({ W - 204.0f, H - 128.0f, 184, 48 }, "Fine round", Pal::PanelHi, Pal::Cyan, 16)) { activeMatch.ended = true; activeMatch.winnerTeam = -1; OnRoundEnded(); return; }
+            if (ui.Button({ W - 204.0f, H - 70.0f, 184, 48 }, "Esci dalla prova", { 120, 32, 48, 255 }, Pal::Text, 16)) { ExitTraining(); return; }
+        } else {
+            float k = Clamp01(roundBannerTimer * 3.0f), k2 = Clamp01((1.6f - roundBannerTimer) * 5.0f), a = std::min(k, k2);
+            const TrainStat& st = trainStats[std::max(0, trainRound - 2)];
+            DrawRectangle(0, (int)(H * 0.5f - 62), (int)std::ceil(W), 124, { 4, 6, 14, (unsigned char)(190 * a) });
+            char t1[48]; std::snprintf(t1, sizeof(t1), "ROUND %d COMPLETATO", std::max(1, trainRound - 1)); ui.TextOut(t1, W * 0.5f, H * 0.5f - 10, 46, A(st.killed ? Pal::Green : Pal::Cyan, a), 2.2f);
+            char t2[96]; if (st.killed) std::snprintf(t2, sizeof(t2), "Sacco distrutto in %.1fs  -  %.0f danni al secondo", st.time, (float)st.dmg / std::max(0.1f, st.time));
+            else std::snprintf(t2, sizeof(t2), "Danno inflitto: %d su 1000 in %.0fs  -  %.0f danni al secondo", st.dmg, st.time, (float)st.dmg / std::max(0.1f, st.time));
+            ui.TextC(t2, W * 0.5f, H * 0.5f + 34, 17, A(Pal::Text, a), false);
+        }
+        return;
+    }
     Hud();
     char tb[24]; int sec = (int)activeMatch.time; std::snprintf(tb, sizeof(tb), "%d:%02d", sec / 60, sec % 60); ui.TextC(tb, W * 0.5f, 72, 18, Pal::Muted, true);
     if (activeMatch.suddenDeath && state == GameState::ARENA) {
@@ -724,6 +822,27 @@ void PallaGame::ScreenUpgrade() {
 //  RISULTATO
 // ============================================================================
 void PallaGame::ScreenResult() {
+    if (training) {
+        DrawRectangle(0, 0, (int)std::ceil(W), (int)std::ceil(H), { 3, 5, 12, 170 });
+        Rectangle r = { W * 0.5f - 310, H * 0.5f - 205, 620, 410 }; ui.Panel(r, 26, { 16, 23, 42, 252 }, Pal::Green, 2.5f);
+        DrawRectangleRounded({ r.x + 4, r.y + 4, r.width - 8, 96 }, 0.2f, 10, A(Pal::Green, 0.12f));
+        ui.TextC("PROVA COMPLETATA", r.x + r.width * 0.5f, r.y + 44, 40, Pal::Green, true);
+        ui.TextC(ui.Fit(trainBall.name, r.width - 60, 18, true).c_str(), r.x + r.width * 0.5f, r.y + 82, 18, Pal::Text, true);
+        float totDps = 0.0f; int n = 0;
+        for (int i = 0; i < 3; i++) {
+            const TrainStat& st = trainStats[i]; float y = r.y + 122 + i * 52.0f, dps = (float)st.dmg / std::max(0.1f, st.time); totDps += dps; n++;
+            ui.Panel({ r.x + 26, y, r.width - 52, 44 }, 12, { 22, 30, 54, 255 }, { 60, 78, 120, 140 }, 1.0f, false);
+            char a[24]; std::snprintf(a, sizeof(a), "Round %d", i + 1); ui.Text(a, r.x + 42, y + 12, 17, Pal::Muted, true);
+            char b[80]; if (st.killed) std::snprintf(b, sizeof(b), "Sacco distrutto in %.1fs", st.time); else std::snprintf(b, sizeof(b), "Danno %d su 1000 in %.0fs", st.dmg, st.time);
+            ui.Text(b, r.x + 140, y + 12, 17, st.killed ? Pal::Green : Pal::Orange, true);
+            char c[32]; std::snprintf(c, sizeof(c), "%.0f / s", dps); ui.TextR(c, r.x + r.width - 42, y + 12, 17, Pal::Text, true);
+        }
+        char m[64]; std::snprintf(m, sizeof(m), "Media: %.0f danni al secondo", totDps / std::max(1, n)); ui.TextC(m, r.x + r.width * 0.5f, r.y + 292, 18, Pal::Gold, true);
+        const char* back = trainReturn == GameState::AI_CHAT ? "TORNA ALL'AI STUDIO" : (trainReturn == GameState::EDIT ? "TORNA ALL'EDITOR" : (trainReturn == GameState::COLLECTION ? "TORNA ALL'ELENCO" : "TORNA ALLA LOBBY"));
+        if (ui.Button({ r.x + 26, r.y + r.height - 78, 270, 58 }, "RIFAI 3 ROUND", Pal::Green, { 6, 30, 18, 255 }, 20)) { BallDef keep = trainBall; GameState ret = trainReturn; StartTraining(keep, ret); return; }
+        if (ui.Button({ r.x + r.width - 296, r.y + r.height - 78, 270, 58 }, back, Pal::PanelHi, Pal::Text, 16)) { ExitTraining(); return; }
+        return;
+    }
     DrawRectangle(0, 0, (int)std::ceil(W), (int)std::ceil(H), { 3, 5, 12, 150 });
     bool won = resultInfo.won; Color c = won ? Pal::Green : Pal::Red; Rectangle r = { W * 0.5f - 290, H * 0.5f - 190, 580, 380 };
     ui.Panel(r, 26, { 16, 23, 42, 252 }, c, 2.5f);
@@ -736,4 +855,216 @@ void PallaGame::ScreenResult() {
     int sec = (int)resultInfo.duration; std::snprintf(b, sizeof(b), "Ultimo round: %d:%02d   |   Vittorie totali: %d", sec / 60, sec % 60, save.wins); ui.TextC(b, r.x + r.width * 0.5f, r.y + 224, 15, Pal::Muted, false);
     if (ui.Button({ r.x + 36, r.y + r.height - 100, 244, 66 }, "RIGIOCA", Pal::Green, { 6, 30, 18, 255 }, 24)) StartNewMatch();
     if (ui.Button({ r.x + r.width - 280, r.y + r.height - 100, 244, 66 }, "LOBBY", Pal::PanelHi, Pal::Text, 22)) Go(GameState::LOBBY);
+}
+
+
+// ============================================================================
+//  EDITOR PALLE (a mano o con l'AI) - vale per le palle del gioco e per quelle create con l'AI
+// ============================================================================
+static int ClampI(int v, int a, int b) { return v < a ? a : (v > b ? b : v); }
+static float ClampF(float v, float a, float b) { return v < a ? a : (v > b ? b : v); }
+
+static void ApplyDraftTo(BallDef& dst, const BallDef& src) {
+    if (!src.name.empty()) dst.name = src.name;
+    dst.rarity = src.rarity; dst.color = src.color; dst.hp = ClampI(src.hp, 20, 600); dst.dmg = ClampI(src.dmg, 1, 80);
+    dst.speedMult = ClampF(src.speedMult, 0.4f, 2.6f); dst.baseRadius = ClampF(src.baseRadius, 0.7f, 1.8f);
+    dst.visualStyle = src.visualStyle.empty() ? "none" : src.visualStyle; dst.desc = src.desc; dst.scriptRules = src.scriptRules;
+    if (dst.isCustom) dst.customPrompt = ScriptText(dst);   // il testo salvato resta coerente con quello che vedi
+}
+
+void PallaGame::OpenEditor(BallDef* b) {
+    editTarget = b; editDraft = *b; editBuiltin = !b->isCustom; editFocus = 0; aiEditMode = false; editScroll = 0; state = GameState::EDIT; SND(SFX_CLICK);
+}
+
+void PallaGame::SaveEdit() {
+    if (!editTarget) return;
+    ApplyDraftTo(*editTarget, editDraft);
+    if (editBuiltin) { editedIds.insert(editTarget->id); WriteEdits(); } else WriteCustomBalls();
+    spriteRefresh.push_back(editTarget); SetToast("Palla \"" + editTarget->name + "\" aggiornata!");
+    aiEditMode = false; state = GameState::COLLECTION; SND(SFX_WIN);
+}
+
+void PallaGame::ResetEdit() {
+    if (!editTarget || !editBuiltin) return;
+    auto it = originals.find(editTarget->id); if (it == originals.end()) return;
+    *editTarget = it->second; editedIds.erase(editTarget->id); WriteEdits();
+    spriteRefresh.push_back(editTarget); SetToast("Palla ripristinata all'originale"); state = GameState::COLLECTION; SND(SFX_CLICK);
+}
+
+void PallaGame::OpenAiForEdit() {
+    draftCustom = editDraft; draftCustom.isCustom = true; draftCustom.customPrompt = ScriptText(editDraft);
+    chatHistory.clear(); ChatTurn g; g.isUser = false;
+    g.text = "Stai modificando \"" + editDraft.name + "\". Dimmi cosa vuoi cambiare: statistiche, colore, aspetto o abilità. Esempi: \"più veloce e più grossa\", \"fai scudo blu\", \"aggiungi un laser ogni 5 secondi\".";
+    chatHistory.push_back(g); chatInput.clear(); chatStick = true; nativeTarget = 0; aiEditMode = true; state = GameState::AI_CHAT; SND(SFX_CLICK);
+    if (geminiApiKey.empty()) { keyModal = true; modalKey.clear(); modalError.clear(); modalOffer = false; }
+}
+
+void PallaGame::ApplyAiDraftToEditor() {
+    editDraft.name = draftCustom.name; editDraft.rarity = draftCustom.rarity; editDraft.color = draftCustom.color; editDraft.hp = draftCustom.hp; editDraft.dmg = draftCustom.dmg;
+    editDraft.speedMult = draftCustom.speedMult; editDraft.baseRadius = draftCustom.baseRadius; editDraft.visualStyle = draftCustom.visualStyle;
+    editDraft.desc = draftCustom.desc; editDraft.scriptRules = draftCustom.scriptRules;
+    aiEditMode = false; state = GameState::EDIT; SND(SFX_CLICK);
+}
+
+void PallaGame::ScreenEdit() {
+    const InputState& in = ui.in; bool fieldClicked = false;
+    DrawRectangle(0, 0, (int)std::ceil(W), 58, { 8, 12, 24, 235 }); DrawRectangle(0, 57, (int)std::ceil(W), 1, { 255, 255, 255, 26 });
+    if (ui.Button({ 14, 9, 118, 40 }, "Annulla", Pal::PanelHi, Pal::Text, 16)) { Go(GameState::COLLECTION); return; }
+    ui.Text("MODIFICA PALLA", 148, 9, 26, Pal::Text, true);
+    ui.Text(editBuiltin ? "Palla del gioco: l'abilità integrata resta, puoi cambiare il resto e aggiungere regole" : "Palla creata con l'AI: puoi cambiare tutto", 150, 36, 12.5f, Pal::Muted);
+
+    // ---------------- colonna sinistra: anteprima, nome, rarità ----------------
+    float lx = 14, lw = 330; Rectangle pv = { lx, 68, lw, lw * 0.75f };
+    DrawRectangleRounded(pv, 0.06f, 10, { 14, 20, 38, 255 }); DrawSprite(previewTex, pv); DrawRectangleRoundedLinesEx(pv, 0.06f, 10, 1.5f, A(RarityColor(editDraft.rarity), 0.85f));
+    float y = pv.y + pv.height + 10; bool blink = ((int)(globalTime * 2.0f) & 1) == 0;
+    ui.Text("NOME", lx + 2, y, 12, Pal::Muted, true);
+    Rectangle nf = { lx, y + 16, lw, 40 };
+    ui.Panel(nf, 12, { 22, 30, 54, 255 }, editFocus == 1 ? Pal::Cyan : Pal::Border, 1.5f, false);
+    { std::string nm = ui.Fit(editDraft.name, lw - 28, 18, true); ui.Text(nm.c_str(), nf.x + 14, nf.y + 9, 18, Pal::Text, true);
+      if (editFocus == 1 && blink) DrawRectangle((int)(nf.x + 15 + ui.Measure(nm.c_str(), 18, true).x), (int)(nf.y + 8), 2, 24, Pal::Cyan); }
+    if (ui.Click(nf)) { fieldClicked = true;
+#ifdef __ANDROID__
+        nativeTarget = 3; OpenNativeInputDialog("Nome della palla", editDraft.name);
+#else
+        editFocus = 1;
+#endif
+    }
+    y = nf.y + nf.height + 10; ui.Text("RARITÀ", lx + 2, y, 12, Pal::Muted, true);
+    float cw3 = (lw - 16) / 3.0f;
+    for (int i = 0; i < 6; i++) {
+        Rectangle cr = { lx + (i % 3) * (cw3 + 8), y + 16 + (i / 3) * 34.0f, cw3, 28 };
+        if (ui.Chip(cr, RarityName((Rarity)i), RarityColor((Rarity)i), (int)editDraft.rarity == i, 12.5f)) editDraft.rarity = (Rarity)i;
+    }
+    if (editBuiltin && editedIds.count(editTarget ? editTarget->id : "")) ui.Text("Modificata rispetto all'originale", lx + 2, y + 92, 12.5f, Pal::Gold, true);
+
+    // ---------------- colonna destra ----------------
+    float rx = 358, rw = W - rx - 14, colW = (rw - 18) / 2.0f;
+    auto row = [&](const char* label, float& v, float mn, float mx, const char* fmt, Rectangle r, Color ac, bool integer) {
+        char t[24]; std::snprintf(t, sizeof(t), fmt, v); ui.Text(label, r.x + 2, r.y, 12, Pal::Muted, true); ui.TextR(t, r.x + r.width - 2, r.y - 1, 14, Pal::Text, true);
+        return ui.Slider({ r.x, r.y + 14, r.width, 26 }, v, mn, mx, ac, integer);
+    };
+    ui.Text("STATISTICHE", rx, 66, 12, Pal::Cyan, true);
+    { float hp = (float)editDraft.hp, dm = (float)editDraft.dmg;
+      if (row("VITA (HP)", hp, 40, 400, "%.0f", { rx, 84, colW, 40 }, Pal::Red, true)) editDraft.hp = (int)hp;
+      if (row("DANNO", dm, 1, 60, "%.0f", { rx + colW + 18, 84, colW, 40 }, Pal::Orange, true)) editDraft.dmg = (int)dm;
+      row("VELOCITÀ", editDraft.speedMult, 0.5f, 2.4f, "%.2f", { rx, 128, colW, 40 }, Pal::Cyan, false);
+      row("TAGLIA", editDraft.baseRadius, 0.75f, 1.7f, "%.2f", { rx + colW + 18, 128, colW, 40 }, Pal::Green, false); }
+
+    ui.Text("COLORE", rx, 176, 12, Pal::Cyan, true);
+    static const Color sw[12] = { { 239, 68, 68, 255 }, { 249, 115, 22, 255 }, { 250, 204, 21, 255 }, { 132, 204, 22, 255 }, { 34, 197, 94, 255 }, { 20, 184, 166, 255 },
+                                  { 34, 211, 238, 255 }, { 59, 130, 246, 255 }, { 99, 102, 241, 255 }, { 168, 85, 247, 255 }, { 236, 72, 153, 255 }, { 226, 232, 240, 255 } };
+    for (int i = 0; i < 12; i++) {
+        Rectangle sr = { rx + i * 32.0f, 192, 26, 26 }; bool cur = editDraft.color.r == sw[i].r && editDraft.color.g == sw[i].g && editDraft.color.b == sw[i].b;
+        DrawRectangleRounded(sr, 0.35f, 8, sw[i]); if (cur) DrawRectangleRoundedLinesEx({ sr.x - 3, sr.y - 3, sr.width + 6, sr.height + 6 }, 0.35f, 8, 2.5f, WHITE);
+        if (ui.Click(sr)) editDraft.color = sw[i];
+    }
+    { float c3 = (rw - 28) / 3.0f; float cr = editDraft.color.r, cg = editDraft.color.g, cb = editDraft.color.b;
+      if (row("ROSSO", cr, 0, 255, "%.0f", { rx, 224, c3, 40 }, { 239, 68, 68, 255 }, true)) editDraft.color.r = (unsigned char)cr;
+      if (row("VERDE", cg, 0, 255, "%.0f", { rx + c3 + 14, 224, c3, 40 }, { 34, 197, 94, 255 }, true)) editDraft.color.g = (unsigned char)cg;
+      if (row("BLU", cb, 0, 255, "%.0f", { rx + (c3 + 14) * 2, 224, c3, 40 }, { 59, 130, 246, 255 }, true)) editDraft.color.b = (unsigned char)cb; }
+
+    ui.Text("STILE ARMA", rx, 270, 12, Pal::Cyan, true);
+    static const char* styId[10] = { "none", "blade", "axe", "spear", "mg", "orbit", "cactus", "lightwing", "shackles", "zone" };
+    static const char* styNm[10] = { "Nessuna", "Lame", "Ascia", "Lancia", "Mitra", "Orbite", "Cactus", "Ali", "Catene", "Zona" };
+    float sw5 = (rw - 4 * 6.0f) / 5.0f;
+    for (int i = 0; i < 10; i++) {
+        Rectangle cr = { rx + (i % 5) * (sw5 + 6), 286 + (i / 5) * 32.0f, sw5, 26 };
+        if (ui.Chip(cr, styNm[i], Pal::Purple, editDraft.visualStyle == styId[i], 12.5f)) editDraft.visualStyle = styId[i];
+    }
+
+    ui.Text("DESCRIZIONE", rx, 350, 12, Pal::Cyan, true);
+    Rectangle df = { rx, 366, rw, 36 };
+    ui.Panel(df, 12, { 22, 30, 54, 255 }, editFocus == 2 ? Pal::Cyan : Pal::Border, 1.5f, false);
+    { std::string ds = ui.Fit(editDraft.desc, rw - 28, 15); if (editDraft.desc.empty()) ui.Text("Cosa fa questa palla?", df.x + 14, df.y + 9, 15, Pal::Dim); else ui.Text(ds.c_str(), df.x + 14, df.y + 9, 15, Pal::Text);
+      if (editFocus == 2 && blink) DrawRectangle((int)(df.x + 15 + (editDraft.desc.empty() ? 0.0f : ui.Measure(ds.c_str(), 15).x)), (int)(df.y + 7), 2, 22, Pal::Cyan); }
+    if (ui.Click(df)) { fieldClicked = true;
+#ifdef __ANDROID__
+        nativeTarget = 4; OpenNativeInputDialog("Descrizione", editDraft.desc);
+#else
+        editFocus = 2;
+#endif
+    }
+
+    // regole
+    char rt[40]; std::snprintf(rt, sizeof(rt), "REGOLE ABILITÀ (%d)", (int)editDraft.scriptRules.size()); ui.Text(rt, rx, 412, 12, Pal::Cyan, true);
+    float bx = rx + rw;
+#ifdef __ANDROID__
+    bx -= 92; if (ui.Button({ bx, 406, 92, 26 }, "Testo", Pal::PanelHi, Pal::Text, 12.5f)) { nativeTarget = 5; OpenNativeInputDialog("Regole (una per riga, formato RULE:)", RulesToText(editDraft.scriptRules)); } bx -= 8;
+#endif
+    bx -= 92; if (ui.Button({ bx, 406, 92, 26 }, "Incolla", Pal::PanelHi, Pal::Text, 12.5f)) {
+        const char* cl = GetClipboardText(); ParsedBallScript ps = ParseAIScript(cl ? cl : "");
+        if (!ps.rules.empty()) { editDraft.scriptRules = ps.rules; SetToast(ps.warnings.empty() ? "Regole incollate" : "Regole incollate (" + std::to_string(ps.warnings.size()) + " ignorate)"); }
+        else SetToast("Negli appunti non ci sono regole valide");
+    }
+    bx -= 8; bx -= 92; if (ui.Button({ bx, 406, 92, 26 }, "Copia", Pal::PanelHi, Pal::Text, 12.5f)) { SetClipboardText(RulesToText(editDraft.scriptRules).c_str()); SetToast("Regole copiate negli appunti"); }
+
+    float by = H - 56.0f; Rectangle list = { rx, 438, rw, std::max(52.0f, by - 10 - 438) };
+    ui.Panel(list, 12, { 14, 20, 38, 255 }, { 50, 64, 100, 200 }, 1.2f, false);
+    float rowH = 28, contentH = std::max(1, (int)editDraft.scriptRules.size()) * rowH + 8, maxScroll = std::max(0.0f, contentH - list.height);
+    if (ui.enabled && ui.Inside(list, in.pos)) editScroll -= in.wheel * 40.0f;
+    if (ui.enabled && in.down && ui.Inside(list, in.pressPos)) editScroll -= in.dragDy;
+    editScroll = std::max(0.0f, std::min(maxScroll, editScroll));
+    int del = -1; ui.ScissorBegin({ list.x + 2, list.y + 2, list.width - 4, list.height - 4 });
+    if (editDraft.scriptRules.empty()) ui.Wrap(editBuiltin ? "Nessuna regola extra: la palla usa solo la sua abilità integrata. Usa «Modifica con AI» per aggiungerne." : "Nessuna regola. Usa «Modifica con AI» per crearne.", list.x + 14, list.y + 10, list.width - 28, 13.5f, Pal::Dim);
+    for (size_t i = 0; i < editDraft.scriptRules.size(); i++) {
+        float ry = list.y + 6 + i * rowH - editScroll; if (ry + rowH < list.y || ry > list.y + list.height) continue;
+        std::string sm = RuleSummary(editDraft.scriptRules[i]);
+        ui.Text(ui.Fit(sm, list.width - 70, 14).c_str(), list.x + 14, ry + 4, 14, Pal::Text);
+        Rectangle xr = { list.x + list.width - 44, ry + 1, 32, 24 };
+        if (ui.Button(xr, "X", { 120, 32, 48, 255 }, Pal::Text, 12.5f) && ui.Inside(list, in.pos)) del = (int)i;
+    }
+    ui.ScissorEnd();
+    if (del >= 0) editDraft.scriptRules.erase(editDraft.scriptRules.begin() + del);
+
+    // ---------------- barra azioni ----------------
+    if (editBuiltin && editTarget && editedIds.count(editTarget->id) && ui.Button({ lx, by, lw, 46 }, "Ripristina originale", { 90, 40, 30, 255 }, Pal::Text, 15)) { ResetEdit(); return; }
+    float w3 = (rw - 24) / 3.0f;
+    if (ui.Button({ rx, by, w3, 46 }, "PROVA", { 26, 110, 78, 255 }, WHITE, 19)) { StartTraining(editDraft, GameState::EDIT); return; }
+    if (ui.Button({ rx + w3 + 12, by, w3, 46 }, "MODIFICA CON AI", Pal::Purple, WHITE, 16.5f)) { OpenAiForEdit(); return; }
+    if (ui.Button({ rx + (w3 + 12) * 2, by, w3, 46 }, "SALVA", Pal::Green, { 6, 30, 18, 255 }, 20)) { SaveEdit(); return; }
+    if (in.released && !fieldClicked && in.dragDist < 14.0f && ui.enabled) editFocus = 0;
+}
+
+
+// ============================================================================
+//  CAMPO DI PROVA: la tua palla (anche non salvata) contro un sacco fermo da 1000 HP, 3 round, uscita libera
+// ============================================================================
+void PallaGame::StartTraining(const BallDef& b, GameState returnTo) {
+    trainBall = b; trainBall.isDummy = false; trainReturn = returnTo; trainRound = 1; for (auto& st : trainStats) st = TrainStat{};
+    training = true; simSpeed = 1; StartTrainRound(); SND(SFX_CLICK);
+}
+
+void PallaGame::StartTrainRound() {
+    float aim = ((float)(rand() % 1000) / 1000.0f - 0.5f) * 1.2f;   // mira un po' diversa a ogni round
+    activeMatch.Init({ { &trainBall, nullptr } }, { { &trainDummy, nullptr } }, false, false, aim, 0, 0, 1.0f, 0.0f);
+    activeMatch.training = true;   // niente morte improvvisa
+    for (auto& f : activeMatch.fighters) if (f.def->isDummy) { f.pos = { 0.0f, 0.0f }; f.anchor = f.pos; }   // al centro: le palle a contatto lo colpiscono piu' spesso
+    state = GameState::ARENA;
+}
+
+void PallaGame::OnTrainRoundEnded() {
+    int dh = 1000; bool killed = false;
+    for (const auto& f : activeMatch.fighters) if (f.def->isDummy) { dh = std::max(0, f.hp); killed = f.hp <= 0; }
+    TrainStat st; st.time = activeMatch.time; st.dmg = 1000 - dh; st.killed = killed;
+    trainStats[std::max(0, std::min(2, trainRound - 1))] = st; SND(killed ? SFX_WIN : SFX_CLICK);
+    if (trainRound >= 3) state = GameState::RESULT;
+    else { trainRound++; roundBannerTimer = 1.6f; state = GameState::ROUND_END; }
+}
+
+void PallaGame::ExitTraining() { training = false; simSpeed = 1; state = trainReturn; SND(SFX_CLICK); }
+
+void PallaGame::TrainHud() {
+    int dh = 1000; for (const auto& f : activeMatch.fighters) if (f.def->isDummy) dh = std::max(0, f.hp);
+    int dealt = 1000 - dh; float t = std::max(0.1f, activeMatch.time);
+    Rectangle l = { 14, 12, 300, 56 }; ui.Panel(l, 16, { 10, 16, 32, 218 }, A(Pal::Green, 0.6f), 1.5f);
+    ui.Text("CAMPO DI PROVA", l.x + 16, l.y + 8, 13, Pal::Green, true);
+    ui.Text(ui.Fit(trainBall.name, 268, 17, true).c_str(), l.x + 16, l.y + 27, 17, Pal::Text, true);
+    char rb[32]; std::snprintf(rb, sizeof(rb), "ROUND %d/3", trainRound);
+    ui.Panel({ W * 0.5f - 85, 12, 170, 40 }, 20, { 10, 16, 32, 218 }, Pal::Border, 1.2f); ui.TextC(rb, W * 0.5f, 32, 18, Pal::Text, true);
+    char tb[40]; std::snprintf(tb, sizeof(tb), "Tempo %d s", (int)std::ceil(std::max(0.0f, 60.0f - activeMatch.time))); ui.TextC(tb, W * 0.5f, 72, 15, Pal::Muted, true);
+    Rectangle r = { W - 314.0f, 12, 300, 66 }; ui.Panel(r, 16, { 10, 16, 32, 218 }, A(Pal::Red, 0.6f), 1.5f);
+    ui.Text("SACCO FERMO", r.x + 16, r.y + 8, 13, Pal::Red, true);
+    char hb[32]; std::snprintf(hb, sizeof(hb), "%d / 1000", dh); ui.TextR(hb, r.x + r.width - 16, r.y + 6, 16, Pal::Text, true);
+    ui.Bar({ r.x + 16, r.y + 30, r.width - 32, 10 }, (float)dh / 1000.0f, Pal::Red, { 40, 48, 72, 255 });
+    char db[64]; std::snprintf(db, sizeof(db), "Danno %d   -   %.0f al secondo", dealt, (float)dealt / t); ui.Text(db, r.x + 16, r.y + 45, 13, Pal::Muted);
 }

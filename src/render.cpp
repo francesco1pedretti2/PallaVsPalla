@@ -352,6 +352,11 @@ static void DrawFightersScene(const ArenaMatch& m, const Camera3D& cam, float t)
         if (f.def->id == "snake" || (f.fusedDef && f.fusedDef->id == "snake"))
             for (size_t i = 3; i < f.tail.size(); i += 2) LSphere({ f.tail[i].x, 0.45f, f.tail[i].y }, { 0.42f, 0.42f, 0.42f }, { 16, 185, 129, 255 }, 0.9f, 0.5f, { 150, 255, 210, 255 });
         Color tc = (f.team == 0) ? Color{ 46, 229, 121, 255 } : Color{ 255, 72, 102, 255 };
+        if (f.def->isDummy) {   // bersaglio a terra
+            rlDisableDepthMask();
+            for (int k = 0; k < 3; k++) Ring({ f.pos.x, 0.035f + k * 0.004f, f.pos.y }, f.r * (1.45f + k * 0.55f) - 0.10f, f.r * (1.45f + k * 0.55f), (k & 1) ? Color{ 255, 255, 255, 190 } : Color{ 255, 72, 102, 220 });
+            rlEnableDepthMask();
+        }
         DrawBallBody(cam, f.def, f.fusedDef, f.pos, f.r, f.angle, f.look, &tc, f.sqX, f.sqY, f.hitFlash, f.blades, f.shield, t);
     }
 }

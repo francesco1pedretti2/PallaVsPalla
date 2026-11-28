@@ -6,6 +6,7 @@
 #include "ai_client.hpp"
 #include "ui.hpp"
 #include <deque>
+#include <set>
 #include <unordered_map>
 #include <atomic>
 #include <mutex>
@@ -15,17 +16,18 @@
 #include <vector>
 
 constexpr int VIRT_H = 600;
-enum class GameState { LOBBY, COLLECTION, AI_CHAT, RPS, DRAFT, ALL_PICK, AIM, ARENA, ROUND_END, UPGRADE, RESULT };
+enum class GameState { LOBBY, COLLECTION, AI_CHAT, RPS, DRAFT, ALL_PICK, AIM, ARENA, ROUND_END, UPGRADE, RESULT, EDIT };
 enum class GameMode { MODE_1V1=0, MODE_2V2, MODE_FUSION, MODE_RANKED, MODE_TOURNAMENT, MODE_RPS };
 
 struct BallDef {
     std::string id, name; Rarity rarity=Rarity::Raro; Color color=WHITE; int hp=100, dmg=8;
     float speedMult=1.0f, baseRadius=1.15f; std::string visualStyle="none";
     bool isCustom=false; std::string customPrompt; std::vector<ScriptRule> scriptRules; std::string desc;
+    bool isDummy=false;   // bersaglio fermo del campo di prova
 };
 struct Fighter {
     const BallDef* def=nullptr; const BallDef* fusedDef=nullptr; const BallDef* stolenDef=nullptr;
-    int team=0; bool isMinion=false; Vector2 pos{0,0}, vel{0,0}; float r=1.15f;
+    int team=0; bool isMinion=false; Vector2 anchor{0,0}; Vector2 pos{0,0}, vel{0,0}; float r=1.15f;
     int hp=100, maxHp=100, bonusDmg=0, shield=0; float speedMult=1.0f;
     float stun=0, slow=0, poison=0, poisonDps=4.0f, regen=0, timerA=0, timerB=0, timerAux=0, angle=0, look=0;
     int blades=0, fibA=1, fibB=1, chargeStack=1, verityLvl=1, reforgeLvl=0, customReflect=0;
@@ -52,7 +54,7 @@ struct PairCooldown { int a=0, b=0, slot=0; float lastTime=-10; };
 class ArenaMatch {
 public:
     Rectangle bounds{-7.0f, -7.0f, 14.0f, 14.0f};
-    bool demo=false, ranked=false, suddenDeath=false, ended=false;
+    bool demo=false, ranked=false, suddenDeath=false, ended=false, training=false;
     float time=0, hitstop=0, shake=0, wallFlash[4]={0,0,0,0}; int winnerTeam=-1;
     std::vector<Fighter> fighters; std::deque<Projectile> projectiles; std::deque<Hazard> hazards;
     std::deque<LaserBeam> lasers; std::deque<ContinuousBeam> contBeams;
@@ -115,6 +117,16 @@ private:
     std::atomic<bool> aiBusy{false}; std::mutex aiMutex; AiResult aiResult; AiJob aiJobKind=AiJob::NONE; bool aiReplyReady=false; std::thread aiThread;
     float aiBusyTime=0; int nativeTarget=0; // 1 = chat, 2 = chiave
 
+    // --- Campo di prova (sacco da 1000 HP fermo, 3 round, uscita libera) ---
+    bool training=false, collPick=false; int trainRound=1; BallDef trainBall, trainDummy; GameState trainReturn=GameState::LOBBY;
+    struct TrainStat { float time=0; int dmg=0; bool killed=false; } trainStats[3];
+    void StartTraining(const BallDef& b, GameState returnTo); void StartTrainRound(); void OnTrainRoundEnded(); void ExitTraining(); void TrainHud();
+
+    // --- Editor palle ---
+    BallDef* editTarget=nullptr; BallDef editDraft; bool editBuiltin=false, aiEditMode=false; int editFocus=0; float editScroll=0;
+    std::unordered_map<std::string, BallDef> originals; std::set<std::string> editedIds; std::string editsFile;
+    std::vector<const BallDef*> spriteRefresh;
+
     std::string toastMsg; float toastTimer=0;
     struct { bool won=false; int xp=0, rpDelta=0; bool levelUp=false; float duration=0; } resultInfo;
 
@@ -131,15 +143,18 @@ private:
     void AppendTyped(std::string& target, size_t maxLen, bool singleLine);
     // grafica
     const RenderTexture2D* GetSprite(const BallDef* def) const;
-    void BuildSprite(const BallDef* def);
+    void BuildSprite(const BallDef* def, bool force = false);
     std::vector<const BallDef*> spriteQueue; Camera3D curCam{}; float H=600.0f;
     Camera3D ArenaCam(float shake) const;
     // schermate (disegno + click)
     void Backdrop(bool arena3d); void TopBar(const char* title, bool showNav);
     void Rail(); void HandleBack(); void Hud();
     void ScreenLobby(); void ScreenCollection(); void ScreenAiChat(); void ScreenRps(); void ScreenDraft();
+    void ScreenEdit(); void OpenEditor(BallDef* b); void SaveEdit(); void ResetEdit(); void OpenAiForEdit(); void ApplyAiDraftToEditor();
+    void LoadEdits(); void WriteEdits() const;
     void ScreenAim(); void ScreenArena(); void ScreenUpgrade(); void ScreenResult(); void KeyModal(); void Toast();
-    void BallCard(const BallDef* def, Rectangle r, bool highlight, bool showDesc);
+    // buttons: 0 nessuno, 1 = PROVA + MODIFICA, 2 = solo PROVA. Ritorna 1 (modifica) o 2 (prova) se premuto.
+    int BallCard(const BallDef* def, Rectangle r, bool highlight, bool showDesc, int buttons = 0);
     void Hearts(float x, float y, int n, bool alignRight);
     void StatBars(const BallDef* d, Rectangle r);
 };

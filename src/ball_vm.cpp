@@ -268,3 +268,42 @@ std::string SerializeScriptRules(const std::vector<ScriptRule>& rules) {
     return os.str();
 }
 std::vector<ScriptRule> DeserializeScriptRules(const std::string& block) { return ParseAIScript(block).rules; }
+
+// ---------------------------------------------------------------------------
+//  Regole <-> testo (editor palle, copia/incolla, richieste di modifica all'AI)
+// ---------------------------------------------------------------------------
+static std::string QuoteVal(const std::string& v) { std::string o="\""; for (char c : v) { if (c=='"') o+="'"; else o.push_back(c); } return o+"\""; }
+
+std::string RulesToText(const std::vector<ScriptRule>& rules) {
+    const ScriptRule d; std::string out;
+    for (const auto& r : rules) {
+        out += std::string("RULE: trig=")+VmTrigName(r.trig)+" act="+VmActName(r.act);
+        auto S=[&](const char* k,const std::string& v,const std::string& dv){ if (v!=dv) out+=std::string(" ")+k+"="+QuoteVal(v); };
+        S("cond",r.cond,d.cond); S("int",r.interval,d.interval); S("amt",r.amt,d.amt); S("dur",r.dur,d.dur); S("cnt",r.cnt,d.cnt);
+        S("x",r.x,d.x); S("y",r.y,d.y); S("ang",r.ang,d.ang); S("spd",r.spd,d.spd); S("rad",r.rad,d.rad); S("w",r.w,d.w); S("h",r.h,d.h);
+        S("target",r.target,d.target); S("str",r.strArg,d.strArg);
+        auto I=[&](const char* k,int v,int dv){ if (v!=dv) out+=std::string(" ")+k+"=\""+std::to_string(v)+"\""; };
+        I("var",r.varIdx,d.varIdx); I("bnc",r.bnc,d.bnc); I("rep",r.repeat,d.repeat);
+        auto B=[&](const char* k,bool v,bool dv){ if (v!=dv) out+=std::string(" ")+k+"=\""+(v?"1":"0")+"\""; };
+        B("home",r.homing,d.homing); B("pierce",r.pierce,d.pierce); B("once",r.once,d.once); B("track",r.track,d.track); B("ign",r.ignoreShield,d.ignoreShield);
+        out+="\n";
+    }
+    return out;
+}
+
+std::string RuleSummary(const ScriptRule& r) {
+    std::string t;
+    switch (r.trig) {
+        case VmTrig::ON_START: t="All'inizio"; break;
+        case VmTrig::EVERY: t="Ogni "+r.interval+"s"; break;
+        case VmTrig::ON_FRAME: t="Sempre"; break;
+        case VmTrig::ON_WALL: t="Sul muro"; break;
+        case VmTrig::ON_HIT: t="Al colpo"; break;
+        case VmTrig::ON_HURT: t="Se colpita"; break;
+        case VmTrig::ON_KILL: t="Se uccide"; break;
+        case VmTrig::WHEN: t="Quando "+r.cond; break;
+    }
+    t += "  >  "; t += VmActName(r.act);
+    if (r.once) t += "  (1 volta)";
+    return t;
+}

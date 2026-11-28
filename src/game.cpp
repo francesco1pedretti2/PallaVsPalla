@@ -87,7 +87,7 @@ static float PtSegDist(Vector2 p, Vector2 a, Vector2 b) {
 }
 
 Fighter ArenaMatch::MakeFighter(const BallDef* def, const BallDef* fused, int team, float x, float y, float ang, bool minion) {
-    Fighter f; f.def=def; f.fusedDef=fused; f.team=team; f.isMinion=minion; f.pos={x,y};
+    Fighter f; f.def=def; f.fusedDef=fused; f.team=team; f.isMinion=minion; f.pos={x,y}; f.anchor={x,y};
     f.speedMult=fused?((def->speedMult+fused->speedMult)*0.5f):def->speedMult;
     float spd=(minion?10.5f:9.5f)*f.speedMult; f.vel={cosf(ang)*spd,sinf(ang)*spd}; f.r=minion?0.58f:def->baseRadius;
     int baseHp=fused?(int)roundf((def->hp+fused->hp)*0.65f):def->hp; if (minion) baseHp=28;
@@ -101,7 +101,7 @@ Fighter ArenaMatch::MakeFighter(const BallDef* def, const BallDef* fused, int te
 }
 
 void ArenaMatch::Init(const std::vector<std::pair<const BallDef*, const BallDef*>>& allies, const std::vector<std::pair<const BallDef*, const BallDef*>>& enemies, bool isDemo, bool isRanked, float allyAimAng, int allyUpgHp, int allyUpgDmg, float allyUpgSpd, float allyRegen) {
-    bounds={-7.0f,-7.0f,14.0f,14.0f}; demo=isDemo; ranked=isRanked; time=0; hitstop=0; shake=0; suddenDeath=false; ended=false; winnerTeam=-1;
+    bounds={-7.0f,-7.0f,14.0f,14.0f}; demo=isDemo; ranked=isRanked; time=0; hitstop=0; shake=0; suddenDeath=false; ended=false; training=false; winnerTeam=-1;
     for (float& wf : wallFlash) wf=0;
     fighters.clear(); fighters.reserve(64); /* niente riallocazioni: i Fighter& restano validi quando nascono minion o cellule */ projectiles.clear(); hazards.clear(); lasers.clear(); contBeams.clear();
     blackHoles.clear(); tempWalls.clear(); timeFields.clear(); gravFields.clear();
@@ -170,6 +170,7 @@ std::vector<Vector2> ArenaMatch::ComputeBounceRay(Vector2 start, float angle, in
 
 void ArenaMatch::Damage(int targetIdx, int amount, int attackerIdx, const char* label, bool heavy, bool ignoreShield, const GameAudio* audio, bool soundOn) {
     auto& target=fighters[targetIdx]; if (target.hp<=0||ended) return;
+    if (attackerIdx>=0 && attackerIdx<(int)fighters.size() && fighters[attackerIdx].def->isDummy) return;   // il sacco non ferisce
     int dmg=std::max(1,(int)roundf(amount*(suddenDeath?1.5f:1.0f)));
     if (!ignoreShield && target.shield>0) {
         int abs=std::min(target.shield,dmg); target.shield-=abs; dmg-=abs;
@@ -398,7 +399,7 @@ void ArenaMatch::RunTickAbility(int idx, const BallDef* bdef, float& timer, floa
 
 void ArenaMatch::Update(float dt, const GameAudio* audio, bool soundOn) {
     if (ended) return; if (hitstop>0) { hitstop-=dt; return; }
-    time+=dt; if (time>35&&!suddenDeath&&!demo) suddenDeath=true;
+    time+=dt; if (time>35&&!suddenDeath&&!demo&&!training) suddenDeath=true;
     shake=std::max(0.0f,shake-dt*1.2f); for (float& wf : wallFlash) wf=std::max(0.0f,wf-dt*3);
     for (int i=(int)timeFields.size()-1;i>=0;i--) { timeFields[i].life-=dt; if (timeFields[i].life<=0) timeFields.erase(timeFields.begin()+i); }
     for (int i=(int)gravFields.size()-1;i>=0;i--) { gravFields[i].life-=dt; if (gravFields[i].life<=0) gravFields.erase(gravFields.begin()+i); }
@@ -408,6 +409,7 @@ void ArenaMatch::Update(float dt, const GameAudio* audio, bool soundOn) {
     size_t countNow=fighters.size();
     for (size_t idx=0;idx<countNow;idx++) {
         auto& f=fighters[idx]; if (f.hp<=0) continue;
+        if (f.def->isDummy) { f.vel={0,0}; f.pos=f.anchor; }
         float fdt=dt*getTS(f.team);
         if (!f.startDone) { f.startDone=true; TriggerVmEvent((int)idx,VmTrig::ON_START,-1,audio,soundOn); }
         size_t rn=f.runtimeRules.size();
@@ -532,6 +534,7 @@ void ArenaMatch::Update(float dt, const GameAudio* audio, bool soundOn) {
     for (int i=(int)particles.size()-1;i>=0;i--) { particles[i].pos.x+=particles[i].vel.x*dt; particles[i].pos.y+=particles[i].vel.y*dt; particles[i].y+=particles[i].vy*dt; particles[i].vy-=14.0f*dt; if (particles[i].y<0.1f) particles[i].y=0.1f; particles[i].life-=dt; if (particles[i].life<=0) particles.erase(particles.begin()+i); }
     for (int i=(int)shockwaves.size()-1;i>=0;i--) { shockwaves[i].life-=dt; shockwaves[i].r+=(shockwaves[i].maxR-shockwaves[i].r)*std::min(1.0f,dt*11); if (shockwaves[i].life<=0) shockwaves.erase(shockwaves.begin()+i); }
     for (int i=(int)texts.size()-1;i>=0;i--) { texts[i].y+=1.8f*dt; texts[i].life-=dt; if (texts[i].life<=0) texts.erase(texts.begin()+i); }
+    for (auto& f:fighters) if (f.def->isDummy) { f.vel={0,0}; f.pos=f.anchor; }   // anche dopo urti, onde, buchi neri...
     bool aa=false, ea=false; for (const auto& f:fighters) if (f.hp>0) { if (f.team==0) aa=true; else ea=true; }
     if (!aa||!ea) {
         if (demo) { const auto& db=GetBallCatalog(); int a=rand()%db.size(), b=(a+1+rand()%(db.size()-1))%db.size(); Init({{&db[a],nullptr}},{{&db[b],nullptr}},true,false,0.3f,0,0,1,0); }

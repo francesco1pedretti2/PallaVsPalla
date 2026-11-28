@@ -1,4 +1,6 @@
 #include "ui.hpp"
+#include "font_data.h"
+#include "rlgl.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -63,6 +65,19 @@ static bool TryLoadFont(Font& out, const std::vector<std::string>& paths, const 
     return false;
 }
 
+static bool TryLoadMem(Font& out, const unsigned char* data, int size, const std::vector<int>& cps) {
+    Font f = LoadFontFromMemory(".ttf", data, size, 64, const_cast<int*>(cps.data()), (int)cps.size());
+    if (f.texture.id > 0 && f.glyphCount > 0) {
+#ifndef __ANDROID__
+        GenTextureMipmaps(&f.texture); SetTextureFilter(f.texture, TEXTURE_FILTER_TRILINEAR);
+#else
+        SetTextureFilter(f.texture, TEXTURE_FILTER_BILINEAR);
+#endif
+        out = f; return true;
+    }
+    return false;
+}
+
 void UI::Init() {
     std::vector<int> cps;
     for (int c = 32; c <= 126; c++) cps.push_back(c);
@@ -80,8 +95,18 @@ void UI::Init() {
     boldp   = { "C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/seguisb.ttf", "C:/Windows/Fonts/arialbd.ttf", "C:/Windows/Fonts/tahomabd.ttf",
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" };
 #endif
-    bool okR = TryLoadFont(font, regular, cps);
-    bool okB = TryLoadFont(bold, boldp, cps);
+    bool okR = false, okB = false;
+#ifdef __ANDROID__
+    okR = TryLoadMem(font, kFontRegularData, (int)kFontRegularSize, cps);   // Android: font incorporato (affidabile)
+    okB = TryLoadMem(bold, kFontBoldData, (int)kFontBoldSize, cps);
+    if (!okR) okR = TryLoadFont(font, regular, cps);
+    if (!okB) okB = TryLoadFont(bold, boldp, cps);
+#else
+    okR = TryLoadFont(font, regular, cps);                                   // Windows: Segoe UI di sistema, con ripiego incorporato
+    okB = TryLoadFont(bold, boldp, cps);
+    if (!okR) okR = TryLoadMem(font, kFontRegularData, (int)kFontRegularSize, cps);
+    if (!okB) okB = TryLoadMem(bold, kFontBoldData, (int)kFontBoldSize, cps);
+#endif
     if (!okR && okB) font = bold;
     if (!okB && okR) bold = font;
     fontsLoaded = okR || okB;
@@ -225,6 +250,20 @@ bool UI::Button(Rectangle r, const char* label, Color base, Color text, float sz
     return !disabled && Click(r);
 }
 
+bool UI::Slider(Rectangle r, float& v, float mn, float mx, Color accent, bool integer) const {
+    bool changed = false; float pad = 11.0f, tw = r.width - pad * 2.0f;
+    if (enabled && in.down && Inside(r, in.pressPos)) {
+        float t = Cl01((in.pos.x - (r.x + pad)) / std::max(1.0f, tw)), nv = mn + t * (mx - mn);
+        if (integer) nv = std::floor(nv + 0.5f);
+        if (nv != v) { v = nv; changed = true; }
+    }
+    float t = Cl01((v - mn) / std::max(0.0001f, mx - mn)), cy = r.y + r.height * 0.5f, hx = r.x + pad + tw * t;
+    DrawRectangleRounded({ r.x + pad, cy - 4, tw, 8 }, 1.0f, 8, { 36, 44, 70, 255 });
+    DrawRectangleRounded({ r.x + pad, cy - 4, std::max(8.0f, tw * t), 8 }, 1.0f, 8, accent);
+    DrawCircleV({ hx, cy + 1.5f }, 11, { 0, 0, 0, 80 }); DrawCircleV({ hx, cy }, 11, Lighten(accent, 1.35f)); DrawCircleV({ hx, cy }, 6.5f, accent);
+    return changed;
+}
+
 bool UI::Chip(Rectangle r, const char* label, Color accent, bool active, float sz) const {
     bool held = Held(r);
     if (active) {
@@ -238,7 +277,13 @@ bool UI::Chip(Rectangle r, const char* label, Color accent, bool active, float s
     return Click(r);
 }
 
+// Ritaglio in coordinate virtuali. NON usa BeginScissorMode: su Android con HIGHDPI raylib moltiplica le coordinate per la densita'
+// dello schermo (le liste comparivano spostate e tagliate). Qui si parla direttamente con OpenGL, in pixel del framebuffer.
 void UI::ScissorBegin(Rectangle r) const {
-    BeginScissorMode((int)std::floor(r.x * scale), (int)std::floor(r.y * scale), (int)std::ceil(r.width * scale), (int)std::ceil(r.height * scale));
+    rlDrawRenderBatchActive();
+    int sh = std::max(1, GetScreenHeight()); float f = (float)GetRenderHeight() / (float)sh;   // pixel framebuffer / unita' schermo
+    int x = (int)std::floor(r.x * scale * f), w = std::max(0, (int)std::ceil(r.width * scale * f)), h = std::max(0, (int)std::ceil(r.height * scale * f));
+    int y = (int)std::floor((float)sh * f - (r.y + r.height) * scale * f);
+    rlEnableScissorTest(); rlScissor(x, y, w, h);
 }
-void UI::ScissorEnd() const { EndScissorMode(); }
+void UI::ScissorEnd() const { rlDrawRenderBatchActive(); rlDisableScissorTest(); }

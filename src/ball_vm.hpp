@@ -48,6 +48,8 @@ struct ParsedBallScript {
 };
 
 ParsedBallScript ParseAIScript(const std::string& raw);
+std::string RulesToText(const std::vector<ScriptRule>& rules);   // righe "RULE: trig=... act=..." (stesso formato dell'AI)
+std::string RuleSummary(const ScriptRule& r);                       // riassunto leggibile in italiano
 std::string SerializeScriptRules(const std::vector<ScriptRule>& rules);
 std::vector<ScriptRule> DeserializeScriptRules(const std::string& block);
 #endif

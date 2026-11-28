@@ -66,6 +66,7 @@ public:
     bool Held(Rectangle r) const;      // premuto sopra r
     bool Click(Rectangle r) const;     // rilasciato sopra r senza trascinare
     bool Button(Rectangle r, const char* label, Color base, Color text, float sz, bool disabled = false) const;
+    bool Slider(Rectangle r, float& v, float mn, float mx, Color accent, bool integer = false) const;   // trascinabile; true se cambia
     bool Chip(Rectangle r, const char* label, Color accent, bool active, float sz) const;
 
     // Scissor in coordinate virtuali
